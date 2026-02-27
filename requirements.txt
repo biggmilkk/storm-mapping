@@ -1,0 +1,3 @@
+lxml>=4.9
+shapely>=2.0
+streamlit>=1.30
