@@ -17,8 +17,7 @@ from timezonefinder import TimezoneFinder
 # -------------------------
 APP_NAME = "StormTrack Mapper"
 APP_DESC = (
-    "Convert raw JTWC storm KMZ files into clean, analyst-ready KML for alert mapping "
-    "(forecast points, track, and impact zone) with standardized descriptions and local timezone timestamps."
+    "Convert raw JTWC storm KMZ into clean KML for alert mapping."
 )
 
 TRACK_DESCRIPTION = "Forecast Track: The forecast track of the system's center of circulation."
