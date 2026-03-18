@@ -1,3 +1,21 @@
+# app.py — Robust JTWC KMZ -> Cleaned KML/KMZ (single upload)
+#
+# User uploads ONE raw JTWC KMZ. Output is cleaned KML (or KMZ) containing:
+# - Forecast folder
+# - Storm Track
+# - Forecast center points with ONE description line (no extra fields)
+# - One merged "34 knot Danger Swath" polygon with fixed description
+#
+# requirements.txt:
+#   streamlit>=1.30
+#   lxml>=4.9
+#   shapely>=2.0
+#   timezonefinder>=6.5.0
+#   python-dateutil>=2.9.0
+#
+# Run:
+#   streamlit run app.py
+
 import io
 import re
 import zipfile
@@ -9,18 +27,10 @@ import streamlit as st
 from lxml import etree
 from shapely.geometry import Polygon
 from shapely.ops import unary_union
-
 from dateutil.relativedelta import relativedelta
+from zoneinfo import ZoneInfo
 
-try:
-    from zoneinfo import ZoneInfo  # py3.9+
-except Exception:  # pragma: no cover
-    ZoneInfo = None  # type: ignore
-
-try:
-    from timezonefinder import TimezoneFinder
-except Exception:  # pragma: no cover
-    TimezoneFinder = None  # type: ignore
+from timezonefinder import TimezoneFinder
 
 
 # -------------------------
@@ -29,8 +39,12 @@ except Exception:  # pragma: no cover
 KML_NS = "http://www.opengis.net/kml/2.2"
 NSMAP = {None: KML_NS}  # default namespace
 
+TF = TimezoneFinder()
+
+
 def q(tag: str) -> str:
     return f"{{{KML_NS}}}{tag}"
+
 
 def txt(el) -> str:
     return (el.text or "").strip() if el is not None and el.text else ""
@@ -49,11 +63,13 @@ def read_kmz_kml_bytes(kmz_bytes: bytes) -> bytes:
             raise ValueError("No .kml found inside KMZ.")
         return z.read(kml_name)
 
+
 def write_kmz(kml_bytes: bytes) -> bytes:
     out = io.BytesIO()
     with zipfile.ZipFile(out, "w", compression=zipfile.ZIP_DEFLATED) as z:
         z.writestr("doc.kml", kml_bytes)
     return out.getvalue()
+
 
 def parse_kml(kml_bytes: bytes) -> etree._Element:
     parser = etree.XMLParser(recover=True, huge_tree=True, remove_blank_text=True)
@@ -66,6 +82,7 @@ def parse_kml(kml_bytes: bytes) -> etree._Element:
 def is_forecast_folder(name: str) -> bool:
     return "forecast" in (name or "").strip().lower()
 
+
 def extract_point(pm: etree._Element) -> Optional[Tuple[float, float]]:
     coord_el = pm.find(".//" + q("Point") + "/" + q("coordinates"))
     if coord_el is None:
@@ -75,6 +92,7 @@ def extract_point(pm: etree._Element) -> Optional[Tuple[float, float]]:
         return None
     lon, lat, *_ = s.split(",")
     return float(lon), float(lat)
+
 
 def extract_polygon_rings(pm: etree._Element) -> List[List[Tuple[float, float]]]:
     rings: List[List[Tuple[float, float]]] = []
@@ -94,6 +112,7 @@ def extract_polygon_rings(pm: etree._Element) -> List[List[Tuple[float, float]]]
             rings.append(pts)
     return rings
 
+
 def unwrap_ring(ring: List[Tuple[float, float]]) -> List[Tuple[float, float]]:
     # Best-effort dateline unwrap to reduce polygon self-intersections.
     if not ring:
@@ -106,6 +125,7 @@ def unwrap_ring(ring: List[Tuple[float, float]]) -> List[Tuple[float, float]]:
         out.append((best, lat))
         prev = best
     return out
+
 
 def ring_to_poly(ring: List[Tuple[float, float]]) -> Optional[Polygon]:
     r = unwrap_ring(ring)
@@ -125,6 +145,7 @@ def ring_to_poly(ring: List[Tuple[float, float]]) -> Optional[Polygon]:
 # -------------------------
 def in_box(lon360: float, lat: float, lon_min: float, lon_max: float, lat_min: float, lat_max: float) -> bool:
     return (lon_min <= lon360 <= lon_max) and (lat_min <= lat <= lat_max)
+
 
 def pick_agency(lon: float, lat: float) -> str:
     """
@@ -186,41 +207,26 @@ def classify_wind(knots: int, agency: str) -> str:
 
 
 # -------------------------
-# Storm name + time parsing (robust)
+# Time parsing (robust)
 # -------------------------
-# 1) Warning line often: "TROPICAL CYCLONE 23P (URMIL) WARNING NR ..."
-WARNING_RE = re.compile(
-    r"\bTROPICAL\s+(?:CYCLONE|STORM|DEPRESSION)\s+(\d{1,2}[A-Z])\s+\(([^)]+)\).*?\bWARNING\b",
-    re.IGNORECASE
-)
-
-# 2) JTWC DTG style: "240300Z FEB 2026"
+# (A) JTWC DTG style: "240300Z FEB 2026"
 DTG_RE = re.compile(r"\b(\d{2})(\d{2})(\d{2})Z\s+([A-Z]{3})\s+(\d{4})\b", re.IGNORECASE)
 MONTHS = {
     "JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
     "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12,
 }
 
-# 3) Anchor format embedded in track/history points: "26022400Z" meaning YYMMDDHHZ
+# (B) Anchor format embedded in some point names: "26022400Z" => YYMMDDHHZ
 ANCHOR_YYMMDDHH_RE = re.compile(r"\b(\d{8})Z\b")
 
-# 4) Forecast point format: "19/00Z - 105 knots"
+# (C) Forecast point format: "19/12Z - 115 knots"
 FORECAST_NAME_RE = re.compile(
     r"(?P<day>\d{1,2})\s*/\s*(?P<hour>\d{2})Z.*?(?P<knots>\d{1,3})\s*knots?",
     re.IGNORECASE
 )
 
-def parse_warning_storm_id_and_name(names: List[str]) -> Tuple[Optional[str], Optional[str]]:
-    for s in names:
-        m = WARNING_RE.search(s or "")
-        if m:
-            storm_id = m.group(1).upper().strip()
-            storm_name = m.group(2).strip().upper()
-            return storm_id, storm_name
-    return None, None
 
 def parse_dtg_anywhere(names: List[str]) -> Optional[datetime]:
-    # Use the first DTG-looking string we find (UTC)
     for s in names:
         m = DTG_RE.search(s or "")
         if not m:
@@ -238,8 +244,8 @@ def parse_dtg_anywhere(names: List[str]) -> Optional[datetime]:
             continue
     return None
 
+
 def parse_anchor_yyMMddhh(names: List[str]) -> Optional[datetime]:
-    # Find earliest YYMMDDHHZ occurrence and parse it
     candidates: List[datetime] = []
     for s in names:
         m = ANCHOR_YYMMDDHH_RE.search(s or "")
@@ -257,27 +263,20 @@ def parse_anchor_yyMMddhh(names: List[str]) -> Optional[datetime]:
             continue
     return min(candidates) if candidates else None
 
+
 def parse_forecast_day_hour_knots(name: str) -> Optional[Tuple[int, int, int]]:
     m = FORECAST_NAME_RE.search(name or "")
     if not m:
         return None
     return int(m.group("day")), int(m.group("hour")), int(m.group("knots"))
 
+
 def infer_forecast_datetimes(
     forecast_points_in_order: List[Tuple[str, float, float, int, int, int]],
     reference_utc: Optional[datetime]
 ) -> List[datetime]:
     """
-    Given forecast points in chronological order and a reference datetime (from DTG/anchor),
-    infer full UTC datetimes for each point with month rollover handling.
-
-    forecast_points_in_order item:
-      (label, lon, lat, day, hour, knots)
-
-    Logic:
-    - Start month/year from reference_utc if available else "now"
-    - Build datetime(year, month, day, hour)
-    - Ensure monotonic non-decreasing by rolling month forward when it would go backwards
+    Infer full UTC datetimes for each forecast point (month rollover aware).
     """
     if reference_utc is None:
         reference_utc = datetime.now(timezone.utc)
@@ -289,27 +288,25 @@ def infer_forecast_datetimes(
     prev: Optional[datetime] = None
 
     for _label, _lon, _lat, day, hour, _knots in forecast_points_in_order:
-        # Try current (year, month)
-        # If invalid day for the month, advance month until valid.
         cand = None
         y, mth = year, month
-        for _ in range(0, 14):  # safety loop
+
+        # ensure valid date
+        for _ in range(14):
             try:
                 cand = datetime(y, mth, day, hour, 0, tzinfo=timezone.utc)
                 break
             except ValueError:
-                # move forward one month
                 dt_tmp = datetime(y, mth, 1, tzinfo=timezone.utc) + relativedelta(months=+1)
                 y, mth = dt_tmp.year, dt_tmp.month
 
         if cand is None:
             cand = datetime(reference_utc.year, reference_utc.month, 1, tzinfo=timezone.utc)
 
-        # Enforce non-decreasing: if it goes backwards relative to prev, roll month forward
+        # enforce monotonic non-decreasing by rolling month forward if needed
         if prev is not None and cand < prev:
-            # roll forward until >= prev
             y, mth = cand.year, cand.month
-            for _ in range(0, 14):
+            for _ in range(14):
                 dt_tmp = datetime(y, mth, 1, tzinfo=timezone.utc) + relativedelta(months=+1)
                 y, mth = dt_tmp.year, dt_tmp.month
                 try:
@@ -322,47 +319,38 @@ def infer_forecast_datetimes(
 
         out.append(cand)
         prev = cand
-
-        # Update rolling base for next points
         year, month = cand.year, cand.month
 
     return out
 
 
 # -------------------------
-# Timezone (robust)
+# Timezone (abbreviation required)
 # -------------------------
-_TF = TimezoneFinder() if TimezoneFinder is not None else None
-
-def tz_for_point(lat: float, lon: float, agency: str):
+def tz_abbrev_for_point(lat: float, lon: float, agency: str, utc_dt: datetime) -> Tuple[ZoneInfo, str]:
     """
-    Returns tzinfo + label string.
-    - IMD forces Asia/Kolkata (IST)
-    - Else: use timezonefinder -> ZoneInfo
-    - Fallback: nearest UTC offset from lon (rounded) as fixed offset tz
+    Returns (tzinfo, abbreviation) where abbreviation is required.
+    - IMD: force Asia/Kolkata => IST
+    - Else: timezonefinder -> IANA timezone -> tzname() abbreviation at that datetime
+    Raises ValueError if abbreviation cannot be resolved.
     """
     if agency == "IMD":
-        if ZoneInfo is not None:
-            return ZoneInfo("Asia/Kolkata"), "IST"
-        return timezone(timedelta(hours=5, minutes=30)), "IST"
+        tzinfo = ZoneInfo("Asia/Kolkata")
+        abbr = utc_dt.astimezone(tzinfo).tzname()
+        if not abbr:
+            raise ValueError("Could not resolve timezone abbreviation for IMD/IST.")
+        return tzinfo, abbr
 
-    if _TF is not None and ZoneInfo is not None:
-        tzname = _TF.timezone_at(lat=lat, lng=lon)
-        if tzname:
-            try:
-                tzinfo = ZoneInfo(tzname)
-                # We'll label using the datetime's tzname() later; keep tzname handy too
-                return tzinfo, tzname
-            except Exception:
-                pass
+    tzname = TF.timezone_at(lat=lat, lng=lon)
+    if not tzname:
+        raise ValueError("Could not determine timezone for this location (timezonefinder returned None).")
 
-    # Fallback: nearest offset by longitude
-    # Normalize lon to [-180,180)
-    lon_norm = ((lon + 180.0) % 360.0) - 180.0
-    off_h = int(round(lon_norm / 15.0))
-    tzinfo = timezone(timedelta(hours=off_h))
-    label = f"UTC{off_h:+03d}".replace("+0", "+00").replace("-0", "-00")
-    return tzinfo, label
+    tzinfo = ZoneInfo(tzname)
+    abbr = utc_dt.astimezone(tzinfo).tzname()
+    # Some zones can return None/empty in edge cases; enforce abbreviation.
+    if not abbr:
+        raise ValueError(f"Could not resolve timezone abbreviation for timezone '{tzname}'.")
+    return tzinfo, abbr
 
 
 def knots_to_kph_mph(knots: int) -> Tuple[int, int]:
@@ -371,45 +359,22 @@ def knots_to_kph_mph(knots: int) -> Tuple[int, int]:
     return int(round(kph)), int(round(mph))
 
 
-def build_description_html(
-    storm_id: Optional[str],
-    storm_name: Optional[str],
-    agency: str,
-    category: str,
-    knots: int,
-    utc_dt: datetime,
-    lat: float,
-    lon: float
-) -> str:
-    tzinfo, fallback_label = tz_for_point(lat, lon, agency)
+def build_point_description(category: str, knots: int, utc_dt: datetime, lat: float, lon: float, agency: str) -> str:
+    tzinfo, abbr = tz_abbrev_for_point(lat, lon, agency, utc_dt)
     local_dt = utc_dt.astimezone(tzinfo)
 
-    # Prefer abbreviation if available (AEST/AEDT etc.), else fallback_label
-    abbr = local_dt.tzname() or fallback_label
-
     kph, mph = knots_to_kph_mph(knots)
-
-    # "10:00 AEST March 19" format
     time_str = local_dt.strftime("%H:%M")
     month_day = local_dt.strftime("%B %d").replace(" 0", " ")
 
-    header_bits = []
-    if storm_id and storm_name:
-        header_bits.append(f"{storm_id} ({storm_name})")
-    elif storm_name:
-        header_bits.append(storm_name)
-    elif storm_id:
-        header_bits.append(storm_id)
-
-    header = " ".join(header_bits).strip()
-    header_prefix = f"{header} — " if header else ""
-
-    # Your example wording:
+    # EXACT requested format (no storm name prefix, no HTML formatting)
     return (
-        f"<b>{header_prefix}{category}:</b> "
-        f"The forecast center of circulation with a maximum sustained wind speed of "
+        f"{category}: The forecast center of circulation with a maximum sustained wind speed of "
         f"{knots} knots / {kph} kph / {mph} mph as of {time_str} {abbr} {month_day}."
     )
+
+
+SWATH_DESCRIPTION = "Forecast Impact Zone: The area in which impacts from the tropical system are likely to be felt."
 
 
 # -------------------------
@@ -422,20 +387,19 @@ class ForecastPointOut:
     lat: float
     utc_dt: datetime
     knots: int
-    agency: str
-    category: str
-    description_html: str
+    description: str
+
 
 def build_clean_kml(
-    storm_title: str,
+    doc_title: str,
     points: List[ForecastPointOut],
     swath_geom
 ) -> bytes:
     kml = etree.Element(q("kml"), nsmap=NSMAP)
     doc = etree.SubElement(kml, q("Document"))
-    etree.SubElement(doc, q("name")).text = storm_title
+    etree.SubElement(doc, q("name")).text = doc_title
 
-    # Simple embedded styles (no template needed)
+    # Simple embedded styles (no template required)
     # KML colors are aabbggrr (alpha, blue, green, red)
     style_point = etree.SubElement(doc, q("Style"), id="ptStyle")
     iconstyle = etree.SubElement(style_point, q("IconStyle"))
@@ -468,32 +432,23 @@ def build_clean_kml(
         f"{p.lon},{p.lat},0" for p in points
     )
 
-    # Points (with descriptions)
+    # Points (with single description)
     for p in points:
         pm = etree.SubElement(folder, q("Placemark"))
         etree.SubElement(pm, q("name")).text = p.name
         etree.SubElement(pm, q("styleUrl")).text = "#ptStyle"
-
         desc = etree.SubElement(pm, q("description"))
-        desc.text = etree.CDATA(p.description_html)
-
-        # Optional: also store UTC timestamp in ExtendedData for machine-reading
-        ed = etree.SubElement(pm, q("ExtendedData"))
-        data1 = etree.SubElement(ed, q("Data"), name="utc_when")
-        etree.SubElement(data1, q("value")).text = p.utc_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-        data2 = etree.SubElement(ed, q("Data"), name="agency")
-        etree.SubElement(data2, q("value")).text = p.agency
-        data3 = etree.SubElement(ed, q("Data"), name="category")
-        etree.SubElement(data3, q("value")).text = p.category
-
+        desc.text = etree.CDATA(p.description)  # one box only
         pt = etree.SubElement(pm, q("Point"))
         etree.SubElement(pt, q("coordinates")).text = f"{p.lon},{p.lat},0"
 
-    # Swath
+    # Swath (with fixed description)
     if swath_geom is not None and (not swath_geom.is_empty):
         pm_sw = etree.SubElement(folder, q("Placemark"))
         etree.SubElement(pm_sw, q("name")).text = "34 knot Danger Swath"
         etree.SubElement(pm_sw, q("styleUrl")).text = "#polyStyle"
+        desc = etree.SubElement(pm_sw, q("description"))
+        desc.text = etree.CDATA(SWATH_DESCRIPTION)
 
         def write_poly(parent, poly):
             poly_el = etree.SubElement(parent, q("Polygon"))
@@ -517,7 +472,7 @@ def build_clean_kml(
 # -------------------------
 # Main conversion
 # -------------------------
-def convert_raw_jtwc_kmz(raw_kmz: bytes, simplify_tol: float = 0.02) -> Tuple[bytes, str]:
+def convert_raw_jtwc_kmz(raw_kmz: bytes, simplify_tol: float = 0.02) -> bytes:
     raw_kml = read_kmz_kml_bytes(raw_kmz)
     root = parse_kml(raw_kml)
 
@@ -525,18 +480,12 @@ def convert_raw_jtwc_kmz(raw_kmz: bytes, simplify_tol: float = 0.02) -> Tuple[by
     if doc is None:
         raise ValueError("No <Document> found in KML.")
 
-    # Collect *all* placemark names (for storm name + anchors)
+    # Collect all placemark names for time anchoring
     all_names: List[str] = []
     for pm in doc.findall(".//" + q("Placemark")):
         all_names.append(txt(pm.find("./" + q("name"))))
 
-    # Storm identity
-    storm_id, storm_name = parse_warning_storm_id_and_name(all_names)
-
-    # Reference time: best = DTG; else YYMMDDHHZ; else None
-    ref_dtg = parse_dtg_anywhere(all_names)
-    ref_anchor = parse_anchor_yyMMddhh(all_names)
-    reference_utc = ref_dtg or ref_anchor
+    reference_utc = parse_dtg_anywhere(all_names) or parse_anchor_yyMMddhh(all_names)
 
     # Find forecast folder
     forecast = None
@@ -548,7 +497,7 @@ def convert_raw_jtwc_kmz(raw_kmz: bytes, simplify_tol: float = 0.02) -> Tuple[by
     if forecast is None:
         forecast = doc
 
-    # Extract forecast points (center points with "DD/HHZ - N knots")
+    # Extract forecast center points
     raw_forecast_points: List[Tuple[str, float, float, int, int, int]] = []
     for pm in forecast.findall(".//" + q("Placemark")):
         name = txt(pm.find("./" + q("name")))
@@ -557,35 +506,23 @@ def convert_raw_jtwc_kmz(raw_kmz: bytes, simplify_tol: float = 0.02) -> Tuple[by
             continue
         parsed = parse_forecast_day_hour_knots(name)
         if not parsed:
-            # Still a point, but not in forecast format; ignore for "forecast center series"
             continue
         day, hour, knots = parsed
         lon, lat = pt
         raw_forecast_points.append((name, lon, lat, day, hour, knots))
 
     if not raw_forecast_points:
-        raise ValueError(
-            "No forecast center points found. Expected names like '19/00Z - 105 knots' in the Forecast folder."
-        )
+        raise ValueError("No forecast center points found. Expected 'DD/HHZ - N knots' labels.")
 
     # Infer full UTC datetimes for each forecast point (month rollover)
     inferred_utcs = infer_forecast_datetimes(raw_forecast_points, reference_utc)
 
-    # Build output points with agency+category+description
+    # Build output points (description only)
     points_out: List[ForecastPointOut] = []
     for (name, lon, lat, _day, _hour, knots), utc_dt in zip(raw_forecast_points, inferred_utcs):
         agency = pick_agency(lon, lat)
         category = classify_wind(knots, agency)
-        desc_html = build_description_html(
-            storm_id=storm_id,
-            storm_name=storm_name,
-            agency=agency,
-            category=category,
-            knots=knots,
-            utc_dt=utc_dt,
-            lat=lat,
-            lon=lon,
-        )
+        description = build_point_description(category, knots, utc_dt, lat, lon, agency)
         points_out.append(
             ForecastPointOut(
                 name=name,
@@ -593,13 +530,11 @@ def convert_raw_jtwc_kmz(raw_kmz: bytes, simplify_tol: float = 0.02) -> Tuple[by
                 lat=lat,
                 utc_dt=utc_dt,
                 knots=knots,
-                agency=agency,
-                category=category,
-                description_html=desc_html,
+                description=description,
             )
         )
 
-    # Merge 34kt polygons from the same forecast folder
+    # Merge 34kt polygons
     polys: List[Polygon] = []
     for pm in forecast.findall(".//" + q("Placemark")):
         name = txt(pm.find("./" + q("name")))
@@ -616,18 +551,10 @@ def convert_raw_jtwc_kmz(raw_kmz: bytes, simplify_tol: float = 0.02) -> Tuple[by
             merged = merged.simplify(simplify_tol, preserve_topology=True)
         swath = merged
 
-    # Output document title
-    if storm_id and storm_name:
-        storm_title = f"{storm_id} {storm_name} — Cleaned Forecast"
-    elif storm_name:
-        storm_title = f"{storm_name} — Cleaned Forecast"
-    elif storm_id:
-        storm_title = f"{storm_id} — Cleaned Forecast"
-    else:
-        storm_title = "Cleaned JTWC Forecast"
+    # Document title can be generic (you didn't ask for storm name here)
+    doc_title = "Cleaned Forecast"
 
-    out_kml = build_clean_kml(storm_title, points_out, swath)
-    return out_kml, storm_title
+    return build_clean_kml(doc_title, points_out, swath)
 
 
 # -------------------------
@@ -636,44 +563,34 @@ def convert_raw_jtwc_kmz(raw_kmz: bytes, simplify_tol: float = 0.02) -> Tuple[by
 st.set_page_config(page_title="JTWC KMZ Cleaner", layout="centered")
 st.title("JTWC KMZ Cleaner (Raw KMZ → Cleaned KML/KMZ)")
 st.write(
-    "Upload a raw JTWC KMZ. The app will extract forecast center points, infer full dates using internal anchors, "
-    "classify by IMD/BOM/JTWC (Option 2), compute nearest real timezone, and generate description balloons."
+    "Upload a raw JTWC KMZ. The app will infer full dates from internal anchors, classify using IMD/BOM/JTWC rules, "
+    "use real timezone abbreviations (AEST/AEDT/etc.), and write a single description line per point."
 )
 
 raw = st.file_uploader("Raw JTWC KMZ", type=["kmz"])
 tol = st.slider("Swath simplify tolerance", 0.0, 0.1, 0.02, 0.005)
 output_as_kmz = st.toggle("Download as KMZ (instead of KML)", value=False)
 
-# Dependency checks (friendly)
-if TimezoneFinder is None or ZoneInfo is None:
-    st.warning(
-        "Timezone features are running in fallback mode. For best results, add dependencies:\n"
-        "- timezonefinder\n"
-        "- python-dateutil\n"
-        "and ensure Python >= 3.9 for zoneinfo."
-    )
-
 if raw:
     if st.button("Convert"):
         try:
-            out_kml, title = convert_raw_jtwc_kmz(raw.getvalue(), simplify_tol=float(tol))
-
+            out_kml = convert_raw_jtwc_kmz(raw.getvalue(), simplify_tol=float(tol))
             if output_as_kmz:
                 out_bytes = write_kmz(out_kml)
-                filename = re.sub(r"[^A-Za-z0-9._ -]+", "", title).strip().replace("  ", " ")
-                filename = (filename[:80] if filename else "cleaned") + ".kmz"
-                mime = "application/vnd.google-earth.kmz"
-                label = "Download cleaned KMZ"
+                st.download_button(
+                    "Download cleaned KMZ",
+                    data=out_bytes,
+                    file_name="cleaned.kmz",
+                    mime="application/vnd.google-earth.kmz",
+                )
             else:
-                out_bytes = out_kml
-                filename = re.sub(r"[^A-Za-z0-9._ -]+", "", title).strip().replace("  ", " ")
-                filename = (filename[:80] if filename else "cleaned") + ".kml"
-                mime = "application/vnd.google-earth.kml+xml"
-                label = "Download cleaned KML"
-
+                st.download_button(
+                    "Download cleaned KML",
+                    data=out_kml,
+                    file_name="cleaned.kml",
+                    mime="application/vnd.google-earth.kml+xml",
+                )
             st.success("Conversion complete.")
-            st.download_button(label, data=out_bytes, file_name=filename, mime=mime)
-
         except Exception as e:
             st.error(f"Conversion failed: {e}")
 else:
