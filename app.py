@@ -554,7 +554,7 @@ st.set_page_config(page_title=APP_NAME, layout="centered")
 st.markdown(f"## {APP_NAME}")
 st.write(APP_DESC)
 
-raw = st.file_uploader(type=["kmz"])
+raw = st.file_uploader("Upload JTWC KMZ" type=["kmz"])
 
 col1, col2, col3 = st.columns([1, 2, 1])
 
