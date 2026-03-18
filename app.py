@@ -11,7 +11,6 @@ from shapely.geometry import Polygon
 from shapely.ops import unary_union
 from dateutil.relativedelta import relativedelta
 from zoneinfo import ZoneInfo
-
 from timezonefinder import TimezoneFinder
 
 
@@ -20,8 +19,9 @@ from timezonefinder import TimezoneFinder
 # -------------------------
 KML_NS = "http://www.opengis.net/kml/2.2"
 NSMAP = {None: KML_NS}  # default namespace
-
 TF = TimezoneFinder()
+
+SWATH_DESCRIPTION = "Forecast Impact Zone: The area in which impacts from the tropical system are likely to be felt."
 
 
 def q(tag: str) -> str:
@@ -30,6 +30,11 @@ def q(tag: str) -> str:
 
 def txt(el) -> str:
     return (el.text or "").strip() if el is not None and el.text else ""
+
+
+def normalize_lon_180(lon: float) -> float:
+    """Normalize longitude to [-180, 180)."""
+    return ((lon + 180.0) % 360.0) - 180.0
 
 
 # -------------------------
@@ -189,6 +194,24 @@ def classify_wind(knots: int, agency: str) -> str:
 
 
 # -------------------------
+# Storm ID + name parsing (for filename)
+# -------------------------
+WARNING_RE = re.compile(
+    r"\bTROPICAL\s+(?:CYCLONE|STORM|DEPRESSION)\s+(\d{1,2}[A-Z])\s+\(([^)]+)\).*?\bWARNING\b",
+    re.IGNORECASE
+)
+
+def parse_storm_id_name(all_names: List[str]) -> Tuple[Optional[str], Optional[str]]:
+    for s in all_names:
+        m = WARNING_RE.search(s or "")
+        if m:
+            storm_id = m.group(1).upper().strip()
+            storm_name = m.group(2).upper().strip()
+            return storm_id, storm_name
+    return None, None
+
+
+# -------------------------
 # Time parsing (robust)
 # -------------------------
 # (A) JTWC DTG style: "240300Z FEB 2026"
@@ -307,32 +330,84 @@ def infer_forecast_datetimes(
 
 
 # -------------------------
-# Timezone (abbreviation required)
+# Timezone abbreviations (no "+10" allowed)
 # -------------------------
+AU_FALLBACK_ZONES = [
+    "Australia/Brisbane",  # AEST (no DST)
+    "Australia/Sydney",    # AEST/AEDT
+    "Australia/Melbourne", # AEST/AEDT
+    "Australia/Hobart",    # AEST/AEDT
+    "Australia/Adelaide",  # ACST/ACDT
+    "Australia/Darwin",    # ACST
+    "Australia/Perth",     # AWST
+]
+
+def is_bad_abbrev(abbr: Optional[str]) -> bool:
+    if not abbr:
+        return True
+    a = abbr.strip()
+    # bad examples: "+10", "-03", "UTC+10" (some systems), "GMT+10"
+    if re.fullmatch(r"[+-]\d{1,2}(:\d{2})?", a):
+        return True
+    if a.upper().startswith(("UTC", "GMT")) and re.search(r"[+-]\d", a):
+        return True
+    return False
+
+
 def tz_abbrev_for_point(lat: float, lon: float, agency: str, utc_dt: datetime) -> Tuple[ZoneInfo, str]:
     """
-    Returns (tzinfo, abbreviation) where abbreviation is required.
-    - IMD: force Asia/Kolkata => IST
-    - Else: timezonefinder -> IANA timezone -> tzname() abbreviation at that datetime
-    Raises ValueError if abbreviation cannot be resolved.
+    Returns (tzinfo, abbreviation). Ensures abbreviation is NOT a numeric offset like "+10".
+    - IMD: Asia/Kolkata (IST)
+    - Else: timezonefinder (with lon normalized to [-180,180])
+    - If TF fails and agency==BOM: try AU fallback zones
+    - Final fallback: UTC
     """
     if agency == "IMD":
         tzinfo = ZoneInfo("Asia/Kolkata")
         abbr = utc_dt.astimezone(tzinfo).tzname()
-        if not abbr:
-            raise ValueError("Could not resolve timezone abbreviation for IMD/IST.")
-        return tzinfo, abbr
+        if is_bad_abbrev(abbr):
+            raise ValueError("Could not resolve IST abbreviation cleanly.")
+        return tzinfo, abbr  # "IST"
 
-    tzname = TF.timezone_at(lat=lat, lng=lon)
-    if not tzname:
-        raise ValueError("Could not determine timezone for this location (timezonefinder returned None).")
+    lon_norm = normalize_lon_180(lon)
+    tzname = TF.timezone_at(lat=lat, lng=lon_norm)
 
-    tzinfo = ZoneInfo(tzname)
-    abbr = utc_dt.astimezone(tzinfo).tzname()
-    # Some zones can return None/empty in edge cases; enforce abbreviation.
-    if not abbr:
-        raise ValueError(f"Could not resolve timezone abbreviation for timezone '{tzname}'.")
-    return tzinfo, abbr
+    if tzname:
+        try:
+            tzinfo = ZoneInfo(tzname)
+            abbr = utc_dt.astimezone(tzinfo).tzname()
+            if not is_bad_abbrev(abbr):
+                return tzinfo, abbr
+        except Exception:
+            pass
+
+    # BOM-specific robust fallback: pick a real Australia timezone that gives a real abbreviation
+    if agency == "BOM":
+        # pick a zone whose UTC offset is closest to the point's approximate offset
+        approx_off = round(lon_norm / 15.0)
+        best = None
+        for z in AU_FALLBACK_ZONES:
+            try:
+                tzi = ZoneInfo(z)
+                local = utc_dt.astimezone(tzi)
+                abbr = local.tzname()
+                if is_bad_abbrev(abbr):
+                    continue
+                off_hours = local.utcoffset().total_seconds() / 3600.0 if local.utcoffset() else 0.0
+                score = abs(off_hours - approx_off)
+                cand = (score, tzi, abbr)
+                if best is None or cand[0] < best[0]:
+                    best = cand
+            except Exception:
+                continue
+        if best is not None:
+            _, tzi, abbr = best
+            return tzi, abbr
+
+    # Final fallback: UTC (abbrev "UTC")
+    tzi = ZoneInfo("UTC")
+    abbr = utc_dt.astimezone(tzi).tzname() or "UTC"
+    return tzi, abbr
 
 
 def knots_to_kph_mph(knots: int) -> Tuple[int, int]:
@@ -342,21 +417,20 @@ def knots_to_kph_mph(knots: int) -> Tuple[int, int]:
 
 
 def build_point_description(category: str, knots: int, utc_dt: datetime, lat: float, lon: float, agency: str) -> str:
-    tzinfo, abbr = tz_abbrev_for_point(lat, lon, agency, utc_dt)
-    local_dt = utc_dt.astimezone(tzinfo)
+    _, abbr = tz_abbrev_for_point(lat, lon, agency, utc_dt)
+    tzinfo = ZoneInfo("UTC") if abbr == "UTC" else None  # just for clarity; we compute local below via tz_abbrev helper
+    # compute local time using the resolved tzinfo again for correctness:
+    tzinfo2, _abbr2 = tz_abbrev_for_point(lat, lon, agency, utc_dt)
+    local_dt = utc_dt.astimezone(tzinfo2)
 
     kph, mph = knots_to_kph_mph(knots)
     time_str = local_dt.strftime("%H:%M")
     month_day = local_dt.strftime("%B %d").replace(" 0", " ")
 
-    # EXACT requested format (no storm name prefix, no HTML formatting)
     return (
         f"{category}: The forecast center of circulation with a maximum sustained wind speed of "
-        f"{knots} knots / {kph} kph / {mph} mph as of {time_str} {abbr} {month_day}."
+        f"{knots} knots / {kph} kph / {mph} mph as of {time_str} {_abbr2} {month_day}."
     )
-
-
-SWATH_DESCRIPTION = "Forecast Impact Zone: The area in which impacts from the tropical system are likely to be felt."
 
 
 # -------------------------
@@ -382,7 +456,6 @@ def build_clean_kml(
     etree.SubElement(doc, q("name")).text = doc_title
 
     # Simple embedded styles (no template required)
-    # KML colors are aabbggrr (alpha, blue, green, red)
     style_point = etree.SubElement(doc, q("Style"), id="ptStyle")
     iconstyle = etree.SubElement(style_point, q("IconStyle"))
     etree.SubElement(iconstyle, q("scale")).text = "1.1"
@@ -414,17 +487,17 @@ def build_clean_kml(
         f"{p.lon},{p.lat},0" for p in points
     )
 
-    # Points (with single description)
+    # Points (single description only)
     for p in points:
         pm = etree.SubElement(folder, q("Placemark"))
         etree.SubElement(pm, q("name")).text = p.name
         etree.SubElement(pm, q("styleUrl")).text = "#ptStyle"
         desc = etree.SubElement(pm, q("description"))
-        desc.text = etree.CDATA(p.description)  # one box only
+        desc.text = etree.CDATA(p.description)
         pt = etree.SubElement(pm, q("Point"))
         etree.SubElement(pt, q("coordinates")).text = f"{p.lon},{p.lat},0"
 
-    # Swath (with fixed description)
+    # Swath (fixed description)
     if swath_geom is not None and (not swath_geom.is_empty):
         pm_sw = etree.SubElement(folder, q("Placemark"))
         etree.SubElement(pm_sw, q("name")).text = "34 knot Danger Swath"
@@ -454,7 +527,7 @@ def build_clean_kml(
 # -------------------------
 # Main conversion
 # -------------------------
-def convert_raw_jtwc_kmz(raw_kmz: bytes, simplify_tol: float = 0.02) -> bytes:
+def convert_raw_jtwc_kmz(raw_kmz: bytes, simplify_tol: float = 0.02) -> Tuple[bytes, str]:
     raw_kml = read_kmz_kml_bytes(raw_kmz)
     root = parse_kml(raw_kml)
 
@@ -462,10 +535,12 @@ def convert_raw_jtwc_kmz(raw_kmz: bytes, simplify_tol: float = 0.02) -> bytes:
     if doc is None:
         raise ValueError("No <Document> found in KML.")
 
-    # Collect all placemark names for time anchoring
+    # Collect all placemark names
     all_names: List[str] = []
     for pm in doc.findall(".//" + q("Placemark")):
         all_names.append(txt(pm.find("./" + q("name"))))
+
+    storm_id, storm_name = parse_storm_id_name(all_names)
 
     reference_utc = parse_dtg_anywhere(all_names) or parse_anchor_yyMMddhh(all_names)
 
@@ -496,10 +571,9 @@ def convert_raw_jtwc_kmz(raw_kmz: bytes, simplify_tol: float = 0.02) -> bytes:
     if not raw_forecast_points:
         raise ValueError("No forecast center points found. Expected 'DD/HHZ - N knots' labels.")
 
-    # Infer full UTC datetimes for each forecast point (month rollover)
     inferred_utcs = infer_forecast_datetimes(raw_forecast_points, reference_utc)
 
-    # Build output points (description only)
+    # Build output points
     points_out: List[ForecastPointOut] = []
     for (name, lon, lat, _day, _hour, knots), utc_dt in zip(raw_forecast_points, inferred_utcs):
         agency = pick_agency(lon, lat)
@@ -533,10 +607,25 @@ def convert_raw_jtwc_kmz(raw_kmz: bytes, simplify_tol: float = 0.02) -> bytes:
             merged = merged.simplify(simplify_tol, preserve_topology=True)
         swath = merged
 
-    # Document title can be generic (you didn't ask for storm name here)
-    doc_title = "Cleaned Forecast"
+    # Preferred filename scheme:
+    # "27P NARELLE 18/12Z Cleaned Forecast"
+    first_label = raw_forecast_points[0][0]  # e.g., "18/12Z - 115 knots"
+    m = FORECAST_NAME_RE.search(first_label)
+    d_h = ""
+    if m:
+        d_h = f"{int(m.group('day')):02d}/{int(m.group('hour')):02d}Z"
+    parts = []
+    if storm_id:
+        parts.append(storm_id)
+    if storm_name:
+        parts.append(storm_name)
+    if d_h:
+        parts.append(d_h)
+    parts.append("Cleaned Forecast")
+    file_stem = " ".join(parts).strip()
 
-    return build_clean_kml(doc_title, points_out, swath)
+    out_kml = build_clean_kml("Cleaned Forecast", points_out, swath)
+    return out_kml, file_stem
 
 
 # -------------------------
@@ -545,8 +634,8 @@ def convert_raw_jtwc_kmz(raw_kmz: bytes, simplify_tol: float = 0.02) -> bytes:
 st.set_page_config(page_title="JTWC KMZ Cleaner", layout="centered")
 st.title("JTWC KMZ Cleaner (Raw KMZ → Cleaned KML/KMZ)")
 st.write(
-    "Upload a raw JTWC KMZ. The app will infer full dates from internal anchors, classify using IMD/BOM/JTWC rules, "
-    "use real timezone abbreviations (AEST/AEDT/etc.), and write a single description line per point."
+    "Upload a raw JTWC KMZ. The app infers full dates, classifies using IMD/BOM/JTWC rules, "
+    "uses real timezone abbreviations (AEST/AEDT/etc.), and writes a single description line per point."
 )
 
 raw = st.file_uploader("Raw JTWC KMZ", type=["kmz"])
@@ -556,22 +645,27 @@ output_as_kmz = st.toggle("Download as KMZ (instead of KML)", value=False)
 if raw:
     if st.button("Convert"):
         try:
-            out_kml = convert_raw_jtwc_kmz(raw.getvalue(), simplify_tol=float(tol))
+            out_kml, file_stem = convert_raw_jtwc_kmz(raw.getvalue(), simplify_tol=float(tol))
+
+            safe = re.sub(r"[^A-Za-z0-9._ -]+", "", file_stem).strip()
+            safe = re.sub(r"\s+", " ", safe)[:120] if safe else "cleaned"
+
             if output_as_kmz:
                 out_bytes = write_kmz(out_kml)
                 st.download_button(
                     "Download cleaned KMZ",
                     data=out_bytes,
-                    file_name="cleaned.kmz",
+                    file_name=f"{safe}.kmz",
                     mime="application/vnd.google-earth.kmz",
                 )
             else:
                 st.download_button(
                     "Download cleaned KML",
                     data=out_kml,
-                    file_name="cleaned.kml",
+                    file_name=f"{safe}.kml",
                     mime="application/vnd.google-earth.kml+xml",
                 )
+
             st.success("Conversion complete.")
         except Exception as e:
             st.error(f"Conversion failed: {e}")
