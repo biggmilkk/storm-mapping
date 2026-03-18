@@ -1,27 +1,3 @@
-# app.py — Robust JTWC KMZ -> Cleaned KML/KMZ (single upload)
-#
-# What this app does:
-# - User uploads ONE raw JTWC KMZ (e.g., sh2326.kmz, sh2726.kmz)
-# - App outputs a cleaned file (KML by default; optional KMZ) with:
-#   * Forecast folder
-#   * Storm Track LineString from forecast center points
-#   * Forecast points with description balloons:
-#       - Storm name + basin agency (IMD/BOM/JTWC by Option 2)
-#       - Category per your uploaded matrix
-#       - Winds in knots/kph/mph
-#       - Local time using nearest real timezone (timezonefinder + zoneinfo)
-#   * One merged "34 knot Danger Swath" polygon (union of all 34kt polygons)
-#
-# Recommended requirements.txt (you can update yours):
-#   streamlit>=1.30
-#   lxml>=4.9
-#   shapely>=2.0
-#   timezonefinder>=6.5.0
-#   python-dateutil>=2.9.0
-#
-# Run:
-#   streamlit run app.py
-
 import io
 import re
 import zipfile
