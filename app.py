@@ -1,21 +1,3 @@
-# app.py — Robust JTWC KMZ -> Cleaned KML/KMZ (single upload)
-#
-# User uploads ONE raw JTWC KMZ. Output is cleaned KML (or KMZ) containing:
-# - Forecast folder
-# - Storm Track
-# - Forecast center points with ONE description line (no extra fields)
-# - One merged "34 knot Danger Swath" polygon with fixed description
-#
-# requirements.txt:
-#   streamlit>=1.30
-#   lxml>=4.9
-#   shapely>=2.0
-#   timezonefinder>=6.5.0
-#   python-dateutil>=2.9.0
-#
-# Run:
-#   streamlit run app.py
-
 import io
 import re
 import zipfile
