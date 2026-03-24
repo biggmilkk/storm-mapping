@@ -136,8 +136,6 @@ def classify_wind(knots: int, agency: str) -> str:
       - IMD  (Indian Ocean)
       - BOM/FMS (Australia region)
     """
-
-    # JTWC (1-minute)
     if agency == "JTWC":
         if knots < 34:
             return "Tropical Depression"
@@ -147,7 +145,6 @@ def classify_wind(knots: int, agency: str) -> str:
             return "Typhoon"
         return "Super Typhoon"  # >=130
 
-    # IMD (1-minute table wording)
     if agency == "IMD":
         if knots < 33:
             return "Depression"
@@ -163,7 +160,7 @@ def classify_wind(knots: int, agency: str) -> str:
             return "Extremely Severe Cyclonic Storm"
         return "Super Cyclonic Storm"  # >=130
 
-    # BOM/FMS (Australia region) — table wording
+    # BOM/FMS
     if knots < 33:
         return "Tropical Disturbance"
     if knots == 33:
@@ -550,7 +547,7 @@ def convert_raw_jtwc_kmz(raw_kmz: bytes) -> Tuple[bytes, str]:
 
 
 # -------------------------
-# Streamlit UI — improved convert/download flow
+# Streamlit UI — improved convert/download flow + green download button
 # -------------------------
 def reset_output_state():
     st.session_state.out_kml = None
@@ -562,6 +559,28 @@ def reset_output_state():
 st.set_page_config(page_title=APP_NAME, layout="centered")
 st.markdown(f"## {APP_NAME}")
 st.caption(APP_DESC)
+
+# CSS: make ONLY the download button inside #green-download container green
+st.markdown(
+    """
+    <style>
+    #green-download div.stDownloadButton > button {
+        background-color: #16a34a !important;
+        color: white !important;
+        border: 1px solid #15803d !important;
+    }
+    #green-download div.stDownloadButton > button:hover {
+        background-color: #15803d !important;
+        border-color: #166534 !important;
+    }
+    #green-download div.stDownloadButton > button:active {
+        background-color: #166534 !important;
+        border-color: #14532d !important;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
 
 # init session state
 if "out_kml" not in st.session_state:
@@ -614,9 +633,11 @@ with center:
                         st.session_state.out_name = None
                         st.error(f"Conversion failed: {e}")
 
+        # Step 2: Download
         else:
             st.write(f"Output file: **{st.session_state.out_name}**")
-      
+
+            st.markdown('<div id="green-download">', unsafe_allow_html=True)
             st.download_button(
                 "Download KML",
                 data=st.session_state.out_kml,
@@ -624,6 +645,7 @@ with center:
                 mime="application/vnd.google-earth.kml+xml",
                 use_container_width=True,
             )
+            st.markdown("</div>", unsafe_allow_html=True)
 
             if st.button("Convert another file", use_container_width=True):
                 reset_output_state()
