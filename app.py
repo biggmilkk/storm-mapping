@@ -568,14 +568,14 @@ col1, col2, col3 = st.columns([1, 2, 1])
 
 if raw:
     with col2:
-        if st.button("Convert & Prepare Download", use_container_width=True):
+        if st.button("Convert", use_container_width=True):
             try:
                 out_kml, file_stem = convert_raw_jtwc_kmz(raw.getvalue())
                 safe = re.sub(r"[^A-Za-z0-9._ -]+", "", file_stem).strip()
                 safe = re.sub(r"\s+", " ", safe)[:140] if safe else "cleaned"
                 st.session_state.out_kml = out_kml
                 st.session_state.out_name = f"{safe}.kml"
-                st.success("Prepared. Click below to download.")
+                st.success("Completed.")
             except Exception as e:
                 st.session_state.out_kml = None
                 st.session_state.out_name = None
@@ -584,7 +584,7 @@ if raw:
     if st.session_state.out_kml and st.session_state.out_name:
         with col2:
             st.download_button(
-                "Download KML",
+                "Download",
                 data=st.session_state.out_kml,
                 file_name=st.session_state.out_name,
                 mime="application/vnd.google-earth.kml+xml",
