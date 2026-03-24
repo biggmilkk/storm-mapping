@@ -597,7 +597,6 @@ with center:
     else:
         # Step 1: Convert
         if st.session_state.out_kml is None:
-            st.markdown("### Step 1 — Convert")
             st.write(f"Selected file: **{raw.name}**")
 
             if st.button("Convert", type="primary", use_container_width=True):
@@ -615,9 +614,7 @@ with center:
                         st.session_state.out_name = None
                         st.error(f"Conversion failed: {e}")
 
-        # Step 2: Download + Next actions
         else:
-            st.markdown("### Step 2 — Download")
             st.write(f"Output file: **{st.session_state.out_name}**")
 
             st.download_button(
@@ -628,9 +625,8 @@ with center:
                 use_container_width=True,
             )
 
-            st.success("Ready. After downloading, open the KML in Google Earth Pro (or your mapping workflow).")
+            st.success("Ready.")
 
-            st.markdown("#### Next")
             c1, c2 = st.columns(2)
             with c1:
                 if st.button("Convert another file", use_container_width=True):
