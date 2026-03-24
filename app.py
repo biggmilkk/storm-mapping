@@ -978,21 +978,19 @@ if source == "JTWC":
                 st.rerun()
 
 else:
-    st.markdown("### NHC inputs")
-    st.caption("TRACK and TOA 34 are required. Wind warnings are optional.")
 
     track = st.file_uploader(
-        "TRACK KMZ — required",
+        "Upload TRACK.KMZ (required)",
         type=["kmz"],
         key=f"uploader_{st.session_state.uploader_key}_nhc_track",
     )
     toa = st.file_uploader(
-        "TOA 34 KMZ — required",
+        "Upload Earliest Reasonable TOA 34.kmz (required)",
         type=["kmz"],
         key=f"uploader_{st.session_state.uploader_key}_nhc_toa",
     )
     ww = st.file_uploader(
-        "Wind Warnings KMZ — optional",
+        "Upload WW.kmz (optional)",
         type=["kmz"],
         key=f"uploader_{st.session_state.uploader_key}_nhc_ww",
     )
@@ -1012,7 +1010,7 @@ else:
         st.session_state.out_name = None
 
     if track is None or toa is None:
-        st.info("Upload both TRACK and TOA 34 KMZ files to begin.")
+        st.info("Upload both TRACK and Earliest Reasonable TOA 34 KMZ files to begin.")
     else:
         if st.session_state.out_kml is None:
             if st.button("Convert", type="primary", use_container_width=True):
