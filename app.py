@@ -128,14 +128,6 @@ def pick_agency(lon: float, lat: float) -> str:
 # Classification (1-minute table naming)
 # -------------------------
 def classify_wind(knots: int, agency: str) -> str:
-    """
-    Category names and thresholds aligned to the provided 1-minute sustained wind table.
-
-    Agencies used by this tool:
-      - JTWC (Pacific)
-      - IMD  (Indian Ocean)
-      - BOM/FMS (Australia region)
-    """
     if agency == "JTWC":
         if knots < 34:
             return "Tropical Depression"
@@ -143,7 +135,7 @@ def classify_wind(knots: int, agency: str) -> str:
             return "Tropical Storm"
         if 64 <= knots <= 129:
             return "Typhoon"
-        return "Super Typhoon"  # >=130
+        return "Super Typhoon"
 
     if agency == "IMD":
         if knots < 33:
@@ -158,9 +150,8 @@ def classify_wind(knots: int, agency: str) -> str:
             return "Very Severe Cyclonic Storm"
         if 96 <= knots <= 129:
             return "Extremely Severe Cyclonic Storm"
-        return "Super Cyclonic Storm"  # >=130
+        return "Super Cyclonic Storm"
 
-    # BOM/FMS
     if knots < 33:
         return "Tropical Disturbance"
     if knots == 33:
@@ -175,7 +166,7 @@ def classify_wind(knots: int, agency: str) -> str:
         return "Category 3 Severe Tropical Cyclone"
     if 96 <= knots <= 112:
         return "Category 4 Severe Tropical Cyclone"
-    return "Category 5 Severe Tropical Cyclone"  # >=113
+    return "Category 5 Severe Tropical Cyclone"
 
 
 # -------------------------
@@ -563,16 +554,16 @@ st.caption(APP_DESC)
 st.markdown(
     """
     <style>
-    #green-download div.stDownloadButton > button {
+    div[data-testid="stDownloadButton"] button {
         background-color: #16a34a !important;
         color: white !important;
         border: 1px solid #15803d !important;
     }
-    #green-download div.stDownloadButton > button:hover {
+    div[data-testid="stDownloadButton"] button:hover {
         background-color: #15803d !important;
         border-color: #166534 !important;
     }
-    #green-download div.stDownloadButton > button:active {
+    div[data-testid="stDownloadButton"] button:active {
         background-color: #166534 !important;
         border-color: #14532d !important;
     }
@@ -636,7 +627,6 @@ with center:
         else:
             st.write(f"Output file: **{st.session_state.out_name}**")
 
-            st.markdown('<div id="green-download">', unsafe_allow_html=True)
             st.download_button(
                 "Download KML",
                 data=st.session_state.out_kml,
@@ -644,7 +634,6 @@ with center:
                 mime="application/vnd.google-earth.kml+xml",
                 use_container_width=True,
             )
-            st.markdown("</div>", unsafe_allow_html=True)
 
             if st.button("Convert another file", use_container_width=True):
                 reset_output_state()
