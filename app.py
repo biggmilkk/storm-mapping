@@ -868,7 +868,7 @@ if source == "JTWC":
 else:
 
     track = st.file_uploader(
-        "Upload TRACK.KMZ (required)",
+        "Upload TRACK.kmz (required)",
         type=["kmz"],
         key=f"uploader_{st.session_state.uploader_key}_nhc_track",
     )
