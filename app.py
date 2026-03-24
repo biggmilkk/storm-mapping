@@ -103,7 +103,7 @@ def extract_danger_swath_geometry(forecast_folder: etree._Element) -> Optional[e
 
 
 # -------------------------
-# Agency selection (Option 2) — for matrix only
+# Agency selection
 # -------------------------
 def in_box(lon360: float, lat: float, lon_min: float, lon_max: float, lat_min: float, lat_max: float) -> bool:
     return (lon_min <= lon360 <= lon_max) and (lat_min <= lat <= lat_max)
@@ -547,7 +547,7 @@ def convert_raw_jtwc_kmz(raw_kmz: bytes) -> Tuple[bytes, str]:
 
 
 # -------------------------
-# Streamlit UI — improved convert/download flow + green download button
+# Streamlit UI
 # -------------------------
 def reset_output_state():
     st.session_state.out_kml = None
@@ -560,7 +560,6 @@ st.set_page_config(page_title=APP_NAME, layout="centered")
 st.markdown(f"## {APP_NAME}")
 st.caption(APP_DESC)
 
-# CSS: make ONLY the download button inside #green-download container green
 st.markdown(
     """
     <style>
@@ -614,7 +613,7 @@ with center:
     if raw is None:
         st.info("Upload a raw JTWC KMZ to begin.")
     else:
-        # Step 1: Convert
+        # Convert
         if st.session_state.out_kml is None:
             st.write(f"Selected file: **{raw.name}**")
 
@@ -633,7 +632,7 @@ with center:
                         st.session_state.out_name = None
                         st.error(f"Conversion failed: {e}")
 
-        # Step 2: Download
+        # Download
         else:
             st.write(f"Output file: **{st.session_state.out_name}**")
 
