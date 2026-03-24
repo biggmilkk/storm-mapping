@@ -625,13 +625,6 @@ with center:
                 use_container_width=True,
             )
 
-            c1, c2 = st.columns(2)
-            with c1:
-                if st.button("Convert another file", use_container_width=True):
-                    reset_output_state()
-                    st.rerun()
-            with c2:
-                if st.button("Clear result", use_container_width=True):
-                    st.session_state.out_kml = None
-                    st.session_state.out_name = None
-                    st.rerun()
+            if st.button("Convert another file", use_container_width=True):
+                reset_output_state()
+                st.rerun()
