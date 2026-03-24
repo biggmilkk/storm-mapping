@@ -114,7 +114,7 @@ def in_box(lon360: float, lat: float, lon_min: float, lon_max: float, lat_min: f
 def pick_agency(lon: float, lat: float) -> str:
     """
     Option 2:
-      - BOM for Australia region: lat -40..0, lon 90E..160E
+      - BOM/FMS for Australia region: lat -40..0, lon 90E..160E
       - IMD for Indian Ocean-ish: lat -40..30, lon 30E..110E (excluding BOM)
       - JTWC otherwise (Pacific fallback)
     """
@@ -127,9 +127,19 @@ def pick_agency(lon: float, lat: float) -> str:
 
 
 # -------------------------
-# Classification (matrix)
+# Classification (1-minute table naming)
 # -------------------------
 def classify_wind(knots: int, agency: str) -> str:
+    """
+    Category names and thresholds aligned to the provided 1-minute sustained wind table.
+
+    Agencies used by this tool:
+      - JTWC (Pacific)
+      - IMD  (Indian Ocean)
+      - BOM/FMS (Australia region)
+    """
+
+    # JTWC (1-minute)
     if agency == "JTWC":
         if knots < 34:
             return "Tropical Depression"
@@ -137,37 +147,40 @@ def classify_wind(knots: int, agency: str) -> str:
             return "Tropical Storm"
         if 64 <= knots <= 129:
             return "Typhoon"
-        return "Super Typhoon"
+        return "Super Typhoon"  # >=130
 
-    if agency == "BOM":
-        if knots < 34:
-            return "Tropical Low"
-        if 34 <= knots <= 47:
-            return "Tropical Cyclone (1)"
-        if 48 <= knots <= 63:
-            return "Tropical Cyclone (2)"
-        if 64 <= knots <= 85:
-            return "Severe Tropical Cyclone (3)"
-        if 86 <= knots <= 107:
-            return "Severe Tropical Cyclone (4)"
-        if 108 <= knots <= 119:
-            return "Severe Tropical Cyclone (5)"
-        return "Severe Tropical Cyclone (5)"
+    # IMD (1-minute table wording)
+    if agency == "IMD":
+        if knots < 33:
+            return "Depression"
+        if knots == 33:
+            return "Deep Depression"
+        if 34 <= knots <= 54:
+            return "Cyclonic Storm"
+        if 55 <= knots <= 63:
+            return "Severe Cyclonic Storm"
+        if 64 <= knots <= 95:
+            return "Very Severe Cyclonic Storm"
+        if 96 <= knots <= 129:
+            return "Extremely Severe Cyclonic Storm"
+        return "Super Cyclonic Storm"  # >=130
 
-    # IMD
-    if knots < 28:
-        return "Depression"
-    if 28 <= knots <= 33:
-        return "Deep Depression"
-    if 34 <= knots <= 47:
-        return "Cyclonic Storm"
-    if 48 <= knots <= 63:
-        return "Severe Cyclonic Storm"
-    if 64 <= knots <= 89:
-        return "Very Severe Cyclonic Storm"
-    if 90 <= knots <= 119:
-        return "Extremely Severe Cyclonic Storm"
-    return "Super Cyclonic Storm"
+    # BOM/FMS (Australia region) — table wording
+    if knots < 33:
+        return "Tropical Disturbance"
+    if knots == 33:
+        return "Tropical Depression"
+    if 34 <= knots <= 37:
+        return "Tropical Low"
+    if 38 <= knots <= 54:
+        return "Category 1 Tropical Cyclone"
+    if 55 <= knots <= 63:
+        return "Category 2 Tropical Cyclone"
+    if 64 <= knots <= 95:
+        return "Category 3 Severe Tropical Cyclone"
+    if 96 <= knots <= 112:
+        return "Category 4 Severe Tropical Cyclone"
+    return "Category 5 Severe Tropical Cyclone"  # >=113
 
 
 # -------------------------
@@ -264,7 +277,6 @@ def infer_forecast_datetimes(
         cand = None
         y, mth = year, month
 
-        # ensure valid date for that month
         for _ in range(14):
             try:
                 cand = datetime(y, mth, day, hour, 0, tzinfo=timezone.utc)
@@ -276,7 +288,6 @@ def infer_forecast_datetimes(
         if cand is None:
             cand = datetime(reference_utc.year, reference_utc.month, 1, tzinfo=timezone.utc)
 
-        # enforce monotonic non-decreasing
         if prev is not None and cand < prev:
             y, mth = cand.year, cand.month
             for _ in range(14):
@@ -301,7 +312,7 @@ def infer_forecast_datetimes(
 # Timezone abbreviations (location-based)
 # -------------------------
 INDIAN_OCEAN_FALLBACK_ZONES = [
-    "Indian/Antananarivo",  # Madagascar
+    "Indian/Antananarivo",
     "Indian/Reunion",
     "Indian/Mauritius",
     "Indian/Mayotte",
@@ -344,11 +355,6 @@ def is_bad_abbrev(abbr: Optional[str]) -> bool:
 
 
 def tz_abbrev_for_point(lat: float, lon: float, utc_dt: datetime, agency_for_fallbacks: str) -> Tuple[ZoneInfo, str]:
-    """
-    Timezone is based on LOCATION.
-    Primary: timezonefinder (with lon normalized to [-180,180)).
-    Fallback: region-tuned IANA zones to ensure a real abbreviation.
-    """
     lon_norm = normalize_lon_180(lon)
 
     tzname = TF.timezone_at(lat=lat, lng=lon_norm)
@@ -389,7 +395,6 @@ def tz_abbrev_for_point(lat: float, lon: float, utc_dt: datetime, agency_for_fal
         _, tzi, abbr = best
         return tzi, abbr
 
-    # Final fallback: UTC
     return ZoneInfo("UTC"), "UTC"
 
 
@@ -493,7 +498,6 @@ def convert_raw_jtwc_kmz(raw_kmz: bytes) -> Tuple[bytes, str]:
         raise ValueError("No <Document> found in KML.")
 
     all_names: List[str] = [txt(pm.find("./" + q("name"))) for pm in doc.findall(".//" + q("Placemark"))]
-
     storm_id, storm_name = parse_storm_id_name(all_names)
     reference_utc = parse_dtg_anywhere(all_names) or parse_anchor_yyMMddhh(all_names)
 
@@ -536,7 +540,7 @@ def convert_raw_jtwc_kmz(raw_kmz: bytes) -> Tuple[bytes, str]:
     # Copy existing "34 knot Danger Swath" geometry only
     swath_geom = extract_danger_swath_geometry(forecast)
 
-    # Preferred filename scheme: "27P NARELLE 18/12Z Cleaned Forecast"
+    # Preferred filename: "27P NARELLE 18/12Z Cleaned Forecast"
     first_label = raw_forecast_points[0][0]
     m = FORECAST_NAME_RE.search(first_label)
     d_h = f"{int(m.group('day')):02d}/{int(m.group('hour')):02d}Z" if m else ""
@@ -548,33 +552,43 @@ def convert_raw_jtwc_kmz(raw_kmz: bytes) -> Tuple[bytes, str]:
 
 
 # -------------------------
-# Streamlit UI (simple centered)
+# Streamlit UI — “one action” flow
 # -------------------------
 st.set_page_config(page_title=APP_NAME, layout="centered")
 st.markdown(f"## {APP_NAME}")
 st.write(APP_DESC)
 
-raw = st.file_uploader("Upload JTWC KMZ", type=["kmz"])
+raw = st.file_uploader("Upload raw JTWC KMZ", type=["kmz"])
+
+if "out_kml" not in st.session_state:
+    st.session_state.out_kml = None
+    st.session_state.out_name = None
 
 col1, col2, col3 = st.columns([1, 2, 1])
 
 if raw:
     with col2:
-        if st.button("Convert", use_container_width=True):
+        if st.button("Convert & Prepare Download", use_container_width=True):
             try:
                 out_kml, file_stem = convert_raw_jtwc_kmz(raw.getvalue())
                 safe = re.sub(r"[^A-Za-z0-9._ -]+", "", file_stem).strip()
                 safe = re.sub(r"\s+", " ", safe)[:140] if safe else "cleaned"
-
-                st.download_button(
-                    "Download KML",
-                    data=out_kml,
-                    file_name=f"{safe}.kml",
-                    mime="application/vnd.google-earth.kml+xml",
-                    use_container_width=True,
-                )
-                st.success("Ready to download.")
+                st.session_state.out_kml = out_kml
+                st.session_state.out_name = f"{safe}.kml"
+                st.success("Prepared. Click below to download.")
             except Exception as e:
+                st.session_state.out_kml = None
+                st.session_state.out_name = None
                 st.error(f"Conversion failed: {e}")
+
+    if st.session_state.out_kml and st.session_state.out_name:
+        with col2:
+            st.download_button(
+                "Download KML",
+                data=st.session_state.out_kml,
+                file_name=st.session_state.out_name,
+                mime="application/vnd.google-earth.kml+xml",
+                use_container_width=True,
+            )
 else:
     st.info("Upload a raw JTWC KMZ to begin.")
