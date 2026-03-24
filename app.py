@@ -16,9 +16,7 @@ from timezonefinder import TimezoneFinder
 # App branding
 # -------------------------
 APP_NAME = "StormTrack Mapper"
-APP_DESC = (
-    "Convert raw JTWC storm KMZ into clean KML for alert mapping."
-)
+APP_DESC = "Convert raw JTWC storm KMZ into clean KML for alert mapping."
 
 TRACK_DESCRIPTION = "Forecast Track: The forecast track of the system's center of circulation."
 SWATH_DESCRIPTION = "Forecast Impact Zone: The area in which impacts from the tropical system are likely to be felt."
@@ -552,43 +550,94 @@ def convert_raw_jtwc_kmz(raw_kmz: bytes) -> Tuple[bytes, str]:
 
 
 # -------------------------
-# Streamlit UI — “one action” flow
+# Streamlit UI — improved convert/download flow
 # -------------------------
-st.set_page_config(page_title=APP_NAME, layout="centered")
-st.markdown(f"## {APP_NAME}")
-st.write(APP_DESC)
-
-raw = st.file_uploader("Upload raw JTWC KMZ", type=["kmz"])
-
-if "out_kml" not in st.session_state:
+def reset_output_state():
     st.session_state.out_kml = None
     st.session_state.out_name = None
+    st.session_state.last_upload_sig = None
+    st.session_state.uploader_key = st.session_state.get("uploader_key", 0) + 1
 
-col1, col2, col3 = st.columns([1, 2, 1])
 
-if raw:
-    with col1:
-        if st.button("Convert", use_container_width=True):
-            try:
-                out_kml, file_stem = convert_raw_jtwc_kmz(raw.getvalue())
-                safe = re.sub(r"[^A-Za-z0-9._ -]+", "", file_stem).strip()
-                safe = re.sub(r"\s+", " ", safe)[:140] if safe else "cleaned"
-                st.session_state.out_kml = out_kml
-                st.session_state.out_name = f"{safe}.kml"
-                st.success("Completed.")
-            except Exception as e:
-                st.session_state.out_kml = None
-                st.session_state.out_name = None
-                st.error(f"Conversion failed: {e}")
+st.set_page_config(page_title=APP_NAME, layout="centered")
+st.markdown(f"## {APP_NAME}")
+st.caption(APP_DESC)
 
-    if st.session_state.out_kml and st.session_state.out_name:
-        with col1:
+# init session state
+if "out_kml" not in st.session_state:
+    st.session_state.out_kml = None
+if "out_name" not in st.session_state:
+    st.session_state.out_name = None
+if "last_upload_sig" not in st.session_state:
+    st.session_state.last_upload_sig = None
+if "uploader_key" not in st.session_state:
+    st.session_state.uploader_key = 0
+
+raw = st.file_uploader(
+    "Upload raw JTWC KMZ",
+    type=["kmz"],
+    key=f"uploader_{st.session_state.uploader_key}",
+)
+
+# Clear old output when a new file is uploaded
+if raw is not None:
+    upload_sig = (raw.name, raw.size)
+    if st.session_state.last_upload_sig != upload_sig:
+        st.session_state.last_upload_sig = upload_sig
+        st.session_state.out_kml = None
+        st.session_state.out_name = None
+
+st.divider()
+
+left, center, right = st.columns([1, 2, 1])
+
+with center:
+    if raw is None:
+        st.info("Upload a raw JTWC KMZ to begin.")
+    else:
+        # Step 1: Convert
+        if st.session_state.out_kml is None:
+            st.markdown("### Step 1 — Convert")
+            st.write(f"Selected file: **{raw.name}**")
+
+            if st.button("Convert", type="primary", use_container_width=True):
+                with st.spinner("Converting…"):
+                    try:
+                        out_kml, file_stem = convert_raw_jtwc_kmz(raw.getvalue())
+                        safe = re.sub(r"[^A-Za-z0-9._ -]+", "", file_stem).strip()
+                        safe = re.sub(r"\s+", " ", safe)[:140] if safe else "cleaned"
+                        st.session_state.out_kml = out_kml
+                        st.session_state.out_name = f"{safe}.kml"
+                        st.success("Conversion complete.")
+                        st.rerun()
+                    except Exception as e:
+                        st.session_state.out_kml = None
+                        st.session_state.out_name = None
+                        st.error(f"Conversion failed: {e}")
+
+        # Step 2: Download + Next actions
+        else:
+            st.markdown("### Step 2 — Download")
+            st.write(f"Output file: **{st.session_state.out_name}**")
+
             st.download_button(
-                "Download",
+                "Download KML",
                 data=st.session_state.out_kml,
                 file_name=st.session_state.out_name,
                 mime="application/vnd.google-earth.kml+xml",
                 use_container_width=True,
             )
-else:
-    st.info("Upload a raw JTWC KMZ to begin.")
+
+            st.success("Ready. After downloading, open the KML in Google Earth Pro (or your mapping workflow).")
+
+            st.markdown("#### Next")
+            c1, c2 = st.columns(2)
+            with c1:
+                if st.button("Convert another file", use_container_width=True):
+                    reset_output_state()
+                    st.rerun()
+            with c2:
+                if st.button("Clear result", use_container_width=True):
+                    st.session_state.out_kml = None
+                    st.session_state.out_name = None
+                    st.rerun()
