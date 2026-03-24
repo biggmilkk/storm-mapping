@@ -269,7 +269,7 @@ def classify_wind_nhc(knots: int) -> str:
 
 
 # ======================================================================================
-# JTWC CONVERTER
+# JTWC CONVERTER (unchanged)
 # ======================================================================================
 def jtwc_is_forecast_folder(name: str) -> bool:
     return "forecast" in (name or "").strip().lower()
@@ -436,67 +436,36 @@ def build_clean_kml_simple(
     doc_title: str,
     points: List[OutPoint],
     impact_geom: Optional[etree._Element],
-    extra_lines: Optional[List[Tuple[str, str, List[Tuple[float, float]]]]] = None,
 ) -> bytes:
-    extra_lines = extra_lines or []
-
     kml = etree.Element(q(KML_NS_22, "kml"), nsmap=NSMAP_22)
     doc = etree.SubElement(kml, q(KML_NS_22, "Document"))
     etree.SubElement(doc, q(KML_NS_22, "name")).text = doc_title
 
-    style_point = etree.SubElement(doc, q(KML_NS_22, "Style"), id="ptStyle")
-    iconstyle = etree.SubElement(style_point, q(KML_NS_22, "IconStyle"))
-    etree.SubElement(iconstyle, q(KML_NS_22, "scale")).text = "1.1"
-    icon = etree.SubElement(iconstyle, q(KML_NS_22, "Icon"))
-    etree.SubElement(icon, q(KML_NS_22, "href")).text = "http://maps.google.com/mapfiles/kml/shapes/placemark_circle.png"
-
-    style_line = etree.SubElement(doc, q(KML_NS_22, "Style"), id="lineStyle")
-    linestyle = etree.SubElement(style_line, q(KML_NS_22, "LineStyle"))
-    etree.SubElement(linestyle, q(KML_NS_22, "color")).text = "ff00ffff"
-    etree.SubElement(linestyle, q(KML_NS_22, "width")).text = "3"
-
-    style_poly = etree.SubElement(doc, q(KML_NS_22, "Style"), id="polyStyle")
-    polystyle = etree.SubElement(style_poly, q(KML_NS_22, "PolyStyle"))
-    etree.SubElement(polystyle, q(KML_NS_22, "color")).text = "4d0000ff"
-    linestyle2 = etree.SubElement(style_poly, q(KML_NS_22, "LineStyle"))
-    etree.SubElement(linestyle2, q(KML_NS_22, "color")).text = "ff0000ff"
-    etree.SubElement(linestyle2, q(KML_NS_22, "width")).text = "2"
-
     folder = etree.SubElement(doc, q(KML_NS_22, "Folder"))
     etree.SubElement(folder, q(KML_NS_22, "name")).text = "Forecast"
 
+    # Track
     pm_track = etree.SubElement(folder, q(KML_NS_22, "Placemark"))
     etree.SubElement(pm_track, q(KML_NS_22, "name")).text = "Storm Track"
-    etree.SubElement(pm_track, q(KML_NS_22, "styleUrl")).text = "#lineStyle"
     d = etree.SubElement(pm_track, q(KML_NS_22, "description"))
     d.text = etree.CDATA(TRACK_DESCRIPTION)
     ls = etree.SubElement(pm_track, q(KML_NS_22, "LineString"))
     etree.SubElement(ls, q(KML_NS_22, "tessellate")).text = "1"
     etree.SubElement(ls, q(KML_NS_22, "coordinates")).text = " ".join(f"{p.lon},{p.lat},0" for p in points)
 
-    for warn_name, warn_desc, coords in extra_lines:
-        pmw = etree.SubElement(folder, q(KML_NS_22, "Placemark"))
-        etree.SubElement(pmw, q(KML_NS_22, "name")).text = warn_name
-        etree.SubElement(pmw, q(KML_NS_22, "styleUrl")).text = "#lineStyle"
-        dw = etree.SubElement(pmw, q(KML_NS_22, "description"))
-        dw.text = etree.CDATA(warn_desc)
-        lsw = etree.SubElement(pmw, q(KML_NS_22, "LineString"))
-        etree.SubElement(lsw, q(KML_NS_22, "tessellate")).text = "1"
-        etree.SubElement(lsw, q(KML_NS_22, "coordinates")).text = " ".join(f"{lon},{lat},0" for lon, lat in coords)
-
+    # Points
     for p in points:
         pm = etree.SubElement(folder, q(KML_NS_22, "Placemark"))
         etree.SubElement(pm, q(KML_NS_22, "name")).text = p.name
-        etree.SubElement(pm, q(KML_NS_22, "styleUrl")).text = "#ptStyle"
         desc = etree.SubElement(pm, q(KML_NS_22, "description"))
         desc.text = etree.CDATA(p.description)
         pt = etree.SubElement(pm, q(KML_NS_22, "Point"))
         etree.SubElement(pt, q(KML_NS_22, "coordinates")).text = f"{p.lon},{p.lat},0"
 
+    # Impact
     if impact_geom is not None:
         pm_sw = etree.SubElement(folder, q(KML_NS_22, "Placemark"))
         etree.SubElement(pm_sw, q(KML_NS_22, "name")).text = "Impact Zone"
-        etree.SubElement(pm_sw, q(KML_NS_22, "styleUrl")).text = "#polyStyle"
         desc = etree.SubElement(pm_sw, q(KML_NS_22, "description"))
         desc.text = etree.CDATA(IMPACT_DESCRIPTION)
         pm_sw.append(impact_geom)
@@ -529,15 +498,15 @@ def convert_jtwc_kmz(raw_kmz: bytes) -> Tuple[bytes, str]:
     raw_forecast_points: List[Tuple[str, float, float, int, int, int]] = []
     for pm in forecast.findall(".//" + q(ns, "Placemark")):
         name = txt(pm.find("./" + q(ns, "name")))
-        pt = jtwc_extract_point(pm, ns)
-        if not pt:
+        coord = pm.findtext(".//" + q(ns, "Point") + "/" + q(ns, "coordinates")) or ""
+        if not coord:
             continue
         parsed = parse_forecast_day_hour_knots_jtwc(name)
         if not parsed:
             continue
+        lon, lat, *_ = coord.split(",")
         day, hour, knots = parsed
-        lon, lat = pt
-        raw_forecast_points.append((name, lon, lat, day, hour, knots))
+        raw_forecast_points.append((name, float(lon), float(lat), day, hour, knots))
 
     if not raw_forecast_points:
         raise ValueError("JTWC: No forecast points found (expected 'DD/HHZ - N knots').")
@@ -554,12 +523,9 @@ def convert_jtwc_kmz(raw_kmz: bytes) -> Tuple[bytes, str]:
         local_dt = utc_dt.astimezone(tzinfo)
 
         kph, mph = knots_to_kph_mph(knots)
-        time_str = local_dt.strftime("%H:%M")
-        month_day = format_month_day(local_dt)
-
         desc = (
             f"{category}: The forecast center of circulation with a maximum sustained wind speed of "
-            f"{knots} knots / {kph} kph / {mph} mph as of {time_str} {abbr} {month_day}."
+            f"{knots} knots / {kph} kph / {mph} mph as of {local_dt.strftime('%H:%M')} {abbr} {format_month_day(local_dt)}."
         )
 
         out_points.append(OutPoint(name=name, lon=lon, lat=lat, description=desc))
@@ -577,7 +543,7 @@ def convert_jtwc_kmz(raw_kmz: bytes) -> Tuple[bytes, str]:
 
 
 # ======================================================================================
-# NHC CONVERTER
+# NHC CONVERTER (refined to match output.kml/output2.kml structure)
 # ======================================================================================
 VALID_AT_RE = re.compile(r"Valid at:\s*(.+?)\s*</td>", re.IGNORECASE)
 MAX_WIND_RE = re.compile(r"Maximum Wind:\s*([0-9]{1,3})\s*knots", re.IGNORECASE)
@@ -616,6 +582,18 @@ def parse_coords_list(coord_text: str) -> List[Tuple[float, float]]:
     return coords
 
 
+def extract_best_linestring(doc: etree._Element, ns: str) -> Optional[List[Tuple[float, float]]]:
+    best = None
+    best_n = -1
+    for pm in doc.findall(".//" + q(ns, "Placemark")):
+        coords = pm.findtext(".//" + q(ns, "LineString") + "/" + q(ns, "coordinates")) or ""
+        pts = parse_coords_list(coords)
+        if len(pts) > best_n:
+            best_n = len(pts)
+            best = pts
+    return best if best_n > 0 else None
+
+
 def linestring_to_polygon_geom(line_coords: List[Tuple[float, float]]) -> etree._Element:
     if len(line_coords) < 4:
         raise ValueError("TOA 34 contour is too short to form a polygon.")
@@ -633,28 +611,103 @@ def linestring_to_polygon_geom(line_coords: List[Tuple[float, float]]) -> etree.
     return poly
 
 
-def extract_best_linestring(doc: etree._Element, ns: str) -> Optional[List[Tuple[float, float]]]:
-    best = None
-    best_n = -1
-    for pm in doc.findall(".//" + q(ns, "Placemark")):
-        coords = pm.findtext(".//" + q(ns, "LineString") + "/" + q(ns, "coordinates")) or ""
-        pts = parse_coords_list(coords)
-        if len(pts) > best_n:
-            best_n = len(pts)
-            best = pts
-    return best if best_n > 0 else None
+def build_nhc_kml(
+    track_points: List[Tuple[float, float, datetime, int]],
+    toa_polygon: etree._Element,
+    toa_folder_name: str,
+    ww_folder_name: Optional[str],
+    ww_lines: List[Tuple[str, str, List[Tuple[float, float]]]],
+) -> bytes:
+    """
+    Matches the desired NHC output structure:
+      - Document name: "Untitled map"
+      - Folder 1: "Earliest-Reasonable Time of Arrival: ..." (1 Placemark, name blank)
+      - Folder 2: "Forecast Track" (Track linestring + points, placemark names blank)
+      - Folder 3: "<Storm> (Advisory #X) - Watch/Warnings" (optional; multiple warning lines)
+    """
+    kml = etree.Element(q(KML_NS_22, "kml"), nsmap=NSMAP_22)
+    doc = etree.SubElement(kml, q(KML_NS_22, "Document"))
+    etree.SubElement(doc, q(KML_NS_22, "name")).text = "Untitled map"
+
+    # --- TOA folder first (to match your example ordering) ---
+    f_toa = etree.SubElement(doc, q(KML_NS_22, "Folder"))
+    etree.SubElement(f_toa, q(KML_NS_22, "name")).text = toa_folder_name
+
+    pm_toa = etree.SubElement(f_toa, q(KML_NS_22, "Placemark"))
+    etree.SubElement(pm_toa, q(KML_NS_22, "name")).text = ""  # blank like desired outputs
+    d_toa = etree.SubElement(pm_toa, q(KML_NS_22, "description"))
+    d_toa.text = etree.CDATA(IMPACT_DESCRIPTION)
+    pm_toa.append(toa_polygon)
+
+    # --- Forecast Track folder ---
+    f_track = etree.SubElement(doc, q(KML_NS_22, "Folder"))
+    etree.SubElement(f_track, q(KML_NS_22, "name")).text = "Forecast Track"
+
+    # Track line placemark (name blank)
+    pm_line = etree.SubElement(f_track, q(KML_NS_22, "Placemark"))
+    etree.SubElement(pm_line, q(KML_NS_22, "name")).text = ""
+    d_line = etree.SubElement(pm_line, q(KML_NS_22, "description"))
+    d_line.text = etree.CDATA(TRACK_DESCRIPTION)
+
+    ls = etree.SubElement(pm_line, q(KML_NS_22, "LineString"))
+    etree.SubElement(ls, q(KML_NS_22, "tessellate")).text = "1"
+    etree.SubElement(ls, q(KML_NS_22, "coordinates")).text = "\n".join(
+        f"{lon},{lat},0" for lon, lat, _, _ in track_points
+    )
+
+    # Point placemarks (names blank) with NHC-style phrasing
+    for lon, lat, dt_local_naive, knots in track_points:
+        tzinfo, abbr = tzinfo_and_abbr_from_location(lat, lon, dt_local_naive, "NHC")
+        local_dt = dt_local_naive.replace(tzinfo=tzinfo)
+
+        category = classify_wind_nhc(knots)
+        kph, mph = knots_to_kph_mph(knots)
+
+        desc_text = (
+            f"{category}: The forecast center of circulation with a wind speed of "
+            f"{knots} knots / {kph} kph / {mph} mph at {local_dt.strftime('%H:%M')} {abbr} {format_month_day_dot(local_dt)}."
+        )
+
+        pm = etree.SubElement(f_track, q(KML_NS_22, "Placemark"))
+        etree.SubElement(pm, q(KML_NS_22, "name")).text = ""  # blank like desired
+        d = etree.SubElement(pm, q(KML_NS_22, "description"))
+        d.text = etree.CDATA(desc_text)
+        pt = etree.SubElement(pm, q(KML_NS_22, "Point"))
+        etree.SubElement(pt, q(KML_NS_22, "coordinates")).text = f"{lon},{lat},0"
+
+    # --- WW folder (optional) ---
+    if ww_folder_name and ww_lines:
+        f_ww = etree.SubElement(doc, q(KML_NS_22, "Folder"))
+        etree.SubElement(f_ww, q(KML_NS_22, "name")).text = ww_folder_name
+
+        for warn_name, warn_desc, coords in ww_lines:
+            pmw = etree.SubElement(f_ww, q(KML_NS_22, "Placemark"))
+            etree.SubElement(pmw, q(KML_NS_22, "name")).text = warn_name
+            dw = etree.SubElement(pmw, q(KML_NS_22, "description"))
+            dw.text = etree.CDATA(warn_desc)
+            lsw = etree.SubElement(pmw, q(KML_NS_22, "LineString"))
+            etree.SubElement(lsw, q(KML_NS_22, "tessellate")).text = "1"
+            etree.SubElement(lsw, q(KML_NS_22, "coordinates")).text = "\n".join(
+                f"{lon},{lat},0" for lon, lat in coords
+            )
+
+    return etree.tostring(kml, xml_declaration=True, encoding="UTF-8", pretty_print=False)
 
 
 def convert_nhc(track_kmz: bytes, toa34_kmz: bytes, ww_kmz: Optional[bytes]) -> Tuple[bytes, str]:
+    # Required TRACK + TOA
     track_root, track_ns = load_kmz_root(track_kmz)
     track_doc = get_doc(track_root, track_ns, "NHC TRACK")
-
     toa_root, toa_ns = load_kmz_root(toa34_kmz)
     toa_doc = get_doc(toa_root, toa_ns, "NHC TOA 34")
 
-    track_pms = track_doc.findall(".//" + q(track_ns, "Placemark"))
+    # Folder names from source docs (TOA and WW), track folder fixed
+    toa_folder_name = track_toa_name = toa_doc.findtext(q(toa_ns, "name")) or "Earliest-Reasonable Time of Arrival"
+    ww_folder_name = None
+
+    # Parse TRACK points in order
     raw_pts: List[Tuple[float, float, str]] = []
-    for pm in track_pms:
+    for pm in track_doc.findall(".//" + q(track_ns, "Placemark")):
         coord = pm.findtext(".//" + q(track_ns, "Point") + "/" + q(track_ns, "coordinates"))
         if not coord:
             continue
@@ -665,24 +718,33 @@ def convert_nhc(track_kmz: bytes, toa34_kmz: bytes, ww_kmz: Optional[bytes]) -> 
     if not raw_pts:
         raise ValueError("NHC: No track points found in TRACK KMZ.")
 
-    parsed_points: List[Tuple[float, float, datetime, int, str]] = []
+    track_points: List[Tuple[float, float, datetime, int]] = []
+    first_storm_desc = None
     for lon, lat, desc_html in raw_pts:
         dt_local_naive, knots, storm_desc = parse_nhc_track_desc(desc_html)
         if dt_local_naive is None or knots is None:
             continue
-        parsed_points.append((lon, lat, dt_local_naive, knots, storm_desc or ""))
+        track_points.append((lon, lat, dt_local_naive, knots))
+        if not first_storm_desc and storm_desc:
+            first_storm_desc = storm_desc
 
-    if not parsed_points:
+    if not track_points:
         raise ValueError("NHC: Could not parse any point times/winds from TRACK descriptions.")
 
+    # TOA 34 -> polygon (required)
+    best_ls = extract_best_linestring(toa_doc, toa_ns)
+    if not best_ls:
+        raise ValueError("NHC: Could not find a TOA 34 LineString in TOA KMZ.")
+    toa_polygon = linestring_to_polygon_geom(best_ls)
+
+    # Storm ID + name for filename from first_storm_desc / doc name
     storm_id = None
     storm_name = None
-    first_storm_desc = parsed_points[0][4]
     if first_storm_desc:
         m = re.search(r"\(([A-Z]{2}\d{6})\)", first_storm_desc)
         if m:
             storm_id = m.group(1)
-        m2 = re.search(r"\b(?:Tropical Storm|Hurricane|Tropical Depression)\s+([A-Za-z0-9_-]+)\s*\(", first_storm_desc, re.IGNORECASE)
+        m2 = re.search(r"\b(?:Tropical Storm|Hurricane|Tropical Depression|Potential Tropical Cyclone)\s+([A-Za-z0-9_-]+)\s*\(", first_storm_desc, re.IGNORECASE)
         if m2:
             storm_name = m2.group(1).upper()
 
@@ -692,31 +754,24 @@ def convert_nhc(track_kmz: bytes, toa34_kmz: bytes, ww_kmz: Optional[bytes]) -> 
         if m:
             storm_id = m.group(1)
 
-    out_points: List[OutPoint] = []
-    for idx, (lon, lat, dt_local_naive, knots, _sd) in enumerate(parsed_points):
-        tzinfo, abbr = tzinfo_and_abbr_from_location(lat, lon, dt_local_naive, "NHC")
-        local_dt = dt_local_naive.replace(tzinfo=tzinfo)
+    # Filename: use UTC derived from first point local time + location tz
+    first_lon, first_lat, first_local_naive, _ = track_points[0]
+    tzinfo, _abbr = tzinfo_and_abbr_from_location(first_lat, first_lon, first_local_naive, "NHC")
+    first_local = first_local_naive.replace(tzinfo=tzinfo)
+    first_utc = first_local.astimezone(timezone.utc)
+    d_h = f"{first_utc.day:02d}/{first_utc.hour:02d}Z"
 
-        category = classify_wind_nhc(knots)
-        kph, mph = knots_to_kph_mph(knots)
-        center_phrase = "estimated center of circulation" if idx == 0 else "forecast center of circulation"
+    parts = [p for p in [storm_id, storm_name, d_h, "Cleaned Forecast"] if p]
+    file_stem = " ".join(parts).strip() or "output"
 
-        desc = (
-            f"{category}: The {center_phrase} with a wind speed of "
-            f"{knots} knots / {kph} kph / {mph} mph as of {local_dt.strftime('%H:%M')} {abbr} {format_month_day(local_dt)}."
-        )
-        out_points.append(OutPoint(name=f"Point {idx+1}", lon=lon, lat=lat, description=desc))
-
-    best_ls = extract_best_linestring(toa_doc, toa_ns)
-    if not best_ls:
-        raise ValueError("NHC: Could not find a TOA 34 LineString in TOA KMZ.")
-    impact_geom = linestring_to_polygon_geom(best_ls)
-
-    warning_lines: List[Tuple[str, str, List[Tuple[float, float]]]] = []
+    # WW optional
+    ww_lines: List[Tuple[str, str, List[Tuple[float, float]]]] = []
     if ww_kmz:
         ww_root, ww_ns = load_kmz_root(ww_kmz)
         ww_doc = get_doc(ww_root, ww_ns, "NHC WW")
-        adv_dt_local_naive = parsed_points[0][2]
+        ww_folder_name = ww_doc.findtext(q(ww_ns, "name")) or "Watch/Warnings"
+
+        adv_dt_local_naive = track_points[0][2]
 
         for pm in ww_doc.findall(".//" + q(ww_ns, "Placemark")):
             warn_name = (pm.findtext(q(ww_ns, "name")) or "").strip()
@@ -726,22 +781,24 @@ def convert_nhc(track_kmz: bytes, toa34_kmz: bytes, ww_kmz: Optional[bytes]) -> 
                 continue
 
             mid_lon, mid_lat = pts[len(pts) // 2]
-            tzinfo, abbr = tzinfo_and_abbr_from_location(mid_lat, mid_lon, adv_dt_local_naive, "NHC")
-            adv_local = adv_dt_local_naive.replace(tzinfo=tzinfo)
-            warn_desc = f"{warn_name}: Advisory in effect as of {adv_local.strftime('%H:%M')} {abbr} {format_month_day_dot(adv_local)}."
-            warning_lines.append((warn_name, warn_desc, pts))
+            tzinfo2, abbr2 = tzinfo_and_abbr_from_location(mid_lat, mid_lon, adv_dt_local_naive, "NHC")
+            adv_local = adv_dt_local_naive.replace(tzinfo=tzinfo2)
 
-    first_dt = parsed_points[0][2]
-    d_h = f"{first_dt.day:02d}/{first_dt.hour:02d}Z"
-    parts = [p for p in [storm_id, storm_name, d_h, "Cleaned Forecast"] if p]
-    file_stem = " ".join(parts).strip() or "output"
+            warn_desc = f"{warn_name}: Advisory in place as of {adv_local.strftime('%H:%M')} {abbr2} {format_month_day_dot(adv_local)}."
+            ww_lines.append((warn_name, warn_desc, pts))
 
-    out_kml = build_clean_kml_simple("Cleaned Forecast", out_points, impact_geom, extra_lines=warning_lines)
+    out_kml = build_nhc_kml(
+        track_points=track_points,
+        toa_polygon=toa_polygon,
+        toa_folder_name=toa_folder_name,
+        ww_folder_name=ww_folder_name,
+        ww_lines=ww_lines,
+    )
     return out_kml, file_stem
 
 
 # ======================================================================================
-# Streamlit UI (Option A: left-aligned, full-width)
+# Streamlit UI
 # ======================================================================================
 def reset_output_state():
     st.session_state.out_kml = None
