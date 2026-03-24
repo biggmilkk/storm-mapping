@@ -567,7 +567,7 @@ if "out_kml" not in st.session_state:
 col1, col2, col3 = st.columns([1, 2, 1])
 
 if raw:
-    with col2:
+    with col1:
         if st.button("Convert", use_container_width=True):
             try:
                 out_kml, file_stem = convert_raw_jtwc_kmz(raw.getvalue())
@@ -582,7 +582,7 @@ if raw:
                 st.error(f"Conversion failed: {e}")
 
     if st.session_state.out_kml and st.session_state.out_name:
-        with col2:
+        with col1:
             st.download_button(
                 "Download",
                 data=st.session_state.out_kml,
