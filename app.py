@@ -878,7 +878,7 @@ if source == "JTWC":
             st.session_state.out_name = None
 
     if raw is None:
-        st.info("Upload a raw JTWC KMZ to begin.")
+        st.info("Upload JTWC KMZ to begin.")
     else:
         if st.session_state.out_kml is None:
             st.write(f"Selected file: **{raw.name}**")
@@ -923,7 +923,7 @@ else:
         st.session_state.out_name = None
 
     if track is None:
-        st.info("Upload the NHC TRACK KMZ to begin.")
+        st.info("Upload NHC KMZ to begin.")
     else:
         if st.session_state.out_kml is None:
             if st.button("Convert", type="primary", use_container_width=True):
