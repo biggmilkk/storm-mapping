@@ -616,9 +616,7 @@ with center:
 
         else:
             st.write(f"Output file: **{st.session_state.out_name}**")
-
-            st.success("Ready.")
-            
+      
             st.download_button(
                 "Download KML",
                 data=st.session_state.out_kml,
