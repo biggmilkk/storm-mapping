@@ -3,7 +3,7 @@ import re
 import zipfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Optional, List, Tuple
+from typing import Optional, List, Tuple, Dict
 
 import streamlit as st
 from lxml import etree
@@ -74,7 +74,7 @@ def safe_filename(stem: str, fallback: str = "output") -> str:
 
 
 # =========================
-# Timezone (nearest abbreviation by location)
+# Timezone (location lookup) + JTWC carry-forward support
 # =========================
 INDIAN_OCEAN_FALLBACK_ZONES = [
     "Indian/Antananarivo",
@@ -107,8 +107,8 @@ PACIFIC_FALLBACK_ZONES = [
     "Pacific/Honolulu",
 ]
 AMERICAS_FALLBACK_ZONES = [
-    "America/Puerto_Rico",
     "America/Nassau",
+    "America/Puerto_Rico",
     "America/New_York",
     "America/Chicago",
     "America/Denver",
@@ -130,27 +130,32 @@ def is_bad_abbrev(abbr: Optional[str]) -> bool:
     return False
 
 
-def tzinfo_and_abbr_from_location(lat: float, lon: float, dt_local_naive: datetime, fallback_group: str) -> Tuple[ZoneInfo, str]:
+def tzinfo_and_abbr_try(lat: float, lon: float, dt_utc: datetime, fallback_group: str) -> Optional[Tuple[ZoneInfo, str]]:
     """
-    Prefer a land-based timezone even over ocean by using closest_timezone_at.
-    This avoids "CDT" showing up for Atlantic points just because offset matches Chicago.
+    Try to get a timezone from location. Return None if we cannot resolve.
+    Uses closest_timezone_at to handle open water, but still may fail occasionally.
     """
     lon_norm = normalize_lon_180(lon)
-
-    # Primary: timezone_at; if None (often over ocean), use closest_timezone_at
     tzname = TF.timezone_at(lat=lat, lng=lon_norm) or TF.closest_timezone_at(lat=lat, lng=lon_norm)
-
     if tzname:
         try:
             tzi = ZoneInfo(tzname)
-            local_dt = dt_local_naive.replace(tzinfo=tzi)
-            abbr = local_dt.tzname()
+            abbr = dt_utc.astimezone(tzi).tzname()
             if not is_bad_abbrev(abbr):
                 return tzi, abbr
         except Exception:
             pass
 
-    # Fallbacks (rare now that closest_timezone_at exists)
+    # if we still can't get a tzname, do not guess here (JTWC will carry-forward)
+    return None
+
+
+def tzinfo_and_abbr_fallback_from_group(dt_utc: datetime, lon: float, fallback_group: str) -> Tuple[ZoneInfo, str]:
+    """
+    Last-resort fallback (used only if we have no previous timezone to carry forward).
+    """
+    lon_norm = normalize_lon_180(lon)
+
     if fallback_group == "BOM":
         candidates = AU_FALLBACK_ZONES
     elif fallback_group == "IMD":
@@ -165,11 +170,11 @@ def tzinfo_and_abbr_from_location(lat: float, lon: float, dt_local_naive: dateti
     for z in candidates:
         try:
             tzi = ZoneInfo(z)
-            local_dt = dt_local_naive.replace(tzinfo=tzi)
-            abbr = local_dt.tzname()
+            local = dt_utc.astimezone(tzi)
+            abbr = local.tzname()
             if is_bad_abbrev(abbr):
                 continue
-            off_hours = (local_dt.utcoffset().total_seconds() / 3600.0) if local_dt.utcoffset() else 0.0
+            off_hours = (local.utcoffset().total_seconds() / 3600.0) if local.utcoffset() else 0.0
             score = abs(off_hours - approx_off)
             cand = (score, tzi, abbr)
             if best is None or cand[0] < best[0]:
@@ -243,6 +248,7 @@ def classify_wind_table(knots: int, agency: str) -> str:
             return "Extremely Severe Cyclonic Storm"
         return "Super Cyclonic Storm"  # >=130
 
+    # BOM/FMS
     if knots < 33:
         return "Tropical Disturbance"
     if knots == 33:
@@ -261,6 +267,7 @@ def classify_wind_table(knots: int, agency: str) -> str:
 
 
 def classify_wind_nhc(knots: int) -> str:
+    # NHC / Saffir–Simpson in knots (1-min)
     if knots < 34:
         return "Tropical Depression"
     if 34 <= knots <= 63:
@@ -277,7 +284,7 @@ def classify_wind_nhc(knots: int) -> str:
 
 
 # ======================================================================================
-# JTWC CONVERTER
+# JTWC CONVERTER (with timezone carry-forward)
 # ======================================================================================
 def jtwc_is_forecast_folder(name: str) -> bool:
     return "forecast" in (name or "").strip().lower()
@@ -378,7 +385,7 @@ def infer_forecast_datetimes_jtwc(
     out: List[datetime] = []
     prev: Optional[datetime] = None
 
-    for _label, lon, lat, day, hour, knots in forecast_points_in_order:
+    for _label, _lon, _lat, day, hour, _knots in forecast_points_in_order:
         cand = None
         y, mth = year, month
 
@@ -503,16 +510,32 @@ def convert_jtwc_kmz(raw_kmz: bytes) -> Tuple[bytes, str]:
 
     inferred_utcs = infer_forecast_datetimes_jtwc(raw_forecast_points, reference_utc)
 
+    # Carry-forward timezone behavior
+    last_tzinfo: Optional[ZoneInfo] = None
+    last_abbr: Optional[str] = None
+
     out_points: List[OutPoint] = []
     for (name, lon, lat, _d, _h, knots), utc_dt in zip(raw_forecast_points, inferred_utcs):
         agency = jtwc_pick_agency_option2(lon, lat)
         category = classify_wind_table(knots, agency)
 
-        dt_local_naive = utc_dt.replace(tzinfo=None)
-        tzinfo, abbr = tzinfo_and_abbr_from_location(lat, lon, dt_local_naive, agency)
-        local_dt = utc_dt.astimezone(tzinfo)
+        found = tzinfo_and_abbr_try(lat, lon, utc_dt, agency)
 
+        if found is not None:
+            tzinfo, abbr = found
+            last_tzinfo, last_abbr = tzinfo, abbr
+        else:
+            # If we fail to resolve timezone (open water), carry forward.
+            if last_tzinfo is not None and last_abbr is not None:
+                tzinfo, abbr = last_tzinfo, last_abbr
+            else:
+                # First point failed too; use a last-resort fallback once.
+                tzinfo, abbr = tzinfo_and_abbr_fallback_from_group(utc_dt, lon, agency)
+                last_tzinfo, last_abbr = tzinfo, abbr
+
+        local_dt = utc_dt.astimezone(tzinfo)
         kph, mph = knots_to_kph_mph(knots)
+
         desc = (
             f"{category}: The forecast center of circulation with a maximum sustained wind speed of "
             f"{knots} knots / {kph} kph / {mph} mph as of {local_dt.strftime('%H:%M')} {abbr} {format_month_day(local_dt)}."
@@ -533,34 +556,77 @@ def convert_jtwc_kmz(raw_kmz: bytes) -> Tuple[bytes, str]:
 
 
 # ======================================================================================
-# NHC CONVERTER
+# NHC CONVERTER (parse timezone directly from TRACK.kmz)
 # ======================================================================================
-VALID_AT_RE = re.compile(r"Valid at:\s*(.+?)\s*</td>", re.IGNORECASE)
+
+# Abbrev -> IANA zone for filename UTC conversion (best-effort)
+NHC_TZ_ABBREV_TO_IANA: Dict[str, str] = {
+    "EDT": "America/New_York",
+    "EST": "America/New_York",
+    "CDT": "America/Chicago",
+    "CST": "America/Chicago",
+    "MDT": "America/Denver",
+    "MST": "America/Denver",
+    "PDT": "America/Los_Angeles",
+    "PST": "America/Los_Angeles",
+    "AST": "America/Puerto_Rico",
+    "ADT": "America/Halifax",
+    "AKDT": "America/Anchorage",
+    "AKST": "America/Anchorage",
+    "HST": "Pacific/Honolulu",
+}
+
+VALID_AT_LINE_RE = re.compile(r"Valid at:\s*([^<]+)", re.IGNORECASE)
+# Captures: "11:00 AM EDT October 22, 2025" -> time, TZ, date
+VALID_AT_TZ_RE = re.compile(
+    r"(?P<time>\d{1,2}:\d{2}\s*[AP]M)\s+(?P<tz>[A-Z]{2,4})\s+(?P<date>[A-Za-z]+\s+\d{1,2},\s*\d{4})",
+    re.IGNORECASE
+)
 MAX_WIND_RE = re.compile(r"Maximum Wind:\s*([0-9]{1,3})\s*knots", re.IGNORECASE)
 
 
-def parse_nhc_track_desc(desc_html: str) -> Tuple[Optional[datetime], Optional[int], Optional[str]]:
-    if not desc_html:
-        return None, None, None
+def parse_nhc_track_desc(desc_html: str) -> Tuple[Optional[datetime], Optional[int], Optional[str], Optional[str]]:
+    """
+    Returns:
+      (dt_local_naive, max_wind_knots, storm_descriptor, tz_abbrev_from_source)
 
+    tz_abbrev_from_source is taken directly from the TRACK.kmz "Valid at" string.
+    """
+    if not desc_html:
+        return None, None, None, None
+
+    # storm descriptor: "<h2> Tropical Storm X (ALxxxxxx) </h2>"
     storm_desc = None
     m0 = re.search(r"<h2>\s*([^<]+)\s*</h2>", desc_html, re.IGNORECASE)
     if m0:
         storm_desc = re.sub(r"\s+", " ", m0.group(1).strip())
 
-    m = VALID_AT_RE.search(desc_html)
+    # Valid at line (extract timezone abbrev explicitly)
     dt_local = None
-    if m:
-        raw = re.sub(r"\s+", " ", m.group(1).strip())
-        try:
-            dt_local = dtparser.parse(raw, fuzzy=True).replace(tzinfo=None)
-        except Exception:
-            dt_local = None
+    tz_abbrev = None
+    mline = VALID_AT_LINE_RE.search(desc_html)
+    if mline:
+        raw_line = re.sub(r"\s+", " ", mline.group(1).strip())
+        mtz = VALID_AT_TZ_RE.search(raw_line)
+        if mtz:
+            tz_abbrev = mtz.group("tz").upper()
+            # Parse local dt from time + date (ignore tz in parser; we keep tz_abbrev separately)
+            try:
+                dt_local = dtparser.parse(f"{mtz.group('time')} {mtz.group('date')}", fuzzy=True).replace(tzinfo=None)
+            except Exception:
+                dt_local = None
+        else:
+            # fallback parse (no tz capture)
+            try:
+                dt_local = dtparser.parse(raw_line, fuzzy=True).replace(tzinfo=None)
+            except Exception:
+                dt_local = None
 
+    # Maximum wind
     m2 = MAX_WIND_RE.search(desc_html)
     knots = int(m2.group(1)) if m2 else None
 
-    return dt_local, knots, storm_desc
+    return dt_local, knots, storm_desc, tz_abbrev
 
 
 def parse_coords_list(coord_text: str) -> List[Tuple[float, float]]:
@@ -601,12 +667,19 @@ def linestring_to_polygon_geom(line_coords: List[Tuple[float, float]]) -> etree.
 
 
 def build_nhc_kml(
-    track_points: List[Tuple[float, float, datetime, int]],
+    track_points: List[Tuple[float, float, datetime, int, str]],
     toa_polygon: etree._Element,
     toa_folder_name: str,
     ww_folder_name: Optional[str],
     ww_lines: List[Tuple[str, str, List[Tuple[float, float]]]],
 ) -> bytes:
+    """
+    NHC output structure:
+      - Document: "Untitled map"
+      - Folder: TOA name from TOA doc
+      - Folder: "Forecast Track" (line + points)
+      - Folder: WW doc name (optional)
+    """
     kml = etree.Element(q(KML_NS_22, "kml"), nsmap=NSMAP_22)
     doc = etree.SubElement(kml, q(KML_NS_22, "Document"))
     etree.SubElement(doc, q(KML_NS_22, "name")).text = "Untitled map"
@@ -634,20 +707,17 @@ def build_nhc_kml(
     ls = etree.SubElement(pm_line, q(KML_NS_22, "LineString"))
     etree.SubElement(ls, q(KML_NS_22, "tessellate")).text = "1"
     etree.SubElement(ls, q(KML_NS_22, "coordinates")).text = "\n".join(
-        f"{lon},{lat},0" for lon, lat, _, _ in track_points
+        f"{lon},{lat},0" for lon, lat, _, _, _ in track_points
     )
 
-    # Point placemarks
-    for lon, lat, dt_local_naive, knots in track_points:
-        tzinfo, abbr = tzinfo_and_abbr_from_location(lat, lon, dt_local_naive, "NHC")
-        local_dt = dt_local_naive.replace(tzinfo=tzinfo)
-
+    # Point placemarks: use tz abbrev parsed from source (no guessing)
+    for lon, lat, dt_local_naive, knots, tz_abbrev in track_points:
         category = classify_wind_nhc(knots)
         kph, mph = knots_to_kph_mph(knots)
 
         desc_text = (
             f"{category}: The forecast center of circulation with a wind speed of "
-            f"{knots} knots / {kph} kph / {mph} mph at {local_dt.strftime('%H:%M')} {abbr} {format_month_day_dot(local_dt)}."
+            f"{knots} knots / {kph} kph / {mph} mph at {dt_local_naive.strftime('%H:%M')} {tz_abbrev} {format_month_day_dot(dt_local_naive)}."
         )
 
         pm = etree.SubElement(f_track, q(KML_NS_22, "Placemark"))
@@ -657,7 +727,7 @@ def build_nhc_kml(
         pt = etree.SubElement(pm, q(KML_NS_22, "Point"))
         etree.SubElement(pt, q(KML_NS_22, "coordinates")).text = f"{lon},{lat},0"
 
-    # Watch/Warnings folder
+    # Watch/Warnings folder (optional)
     if ww_folder_name and ww_lines:
         f_ww = etree.SubElement(doc, q(KML_NS_22, "Folder"))
         etree.SubElement(f_ww, q(KML_NS_22, "name")).text = ww_folder_name
@@ -685,6 +755,7 @@ def convert_nhc(track_kmz: bytes, toa34_kmz: bytes, ww_kmz: Optional[bytes]) -> 
 
     toa_folder_name = toa_doc.findtext(q(toa_ns, "name")) or "Earliest-Reasonable Time of Arrival"
 
+    # Parse TRACK points in order
     raw_pts: List[Tuple[float, float, str]] = []
     for pm in track_doc.findall(".//" + q(track_ns, "Placemark")):
         coord = pm.findtext(".//" + q(track_ns, "Point") + "/" + q(track_ns, "coordinates"))
@@ -697,31 +768,43 @@ def convert_nhc(track_kmz: bytes, toa34_kmz: bytes, ww_kmz: Optional[bytes]) -> 
     if not raw_pts:
         raise ValueError("NHC: No track points found in TRACK KMZ.")
 
-    track_points: List[Tuple[float, float, datetime, int]] = []
+    track_points: List[Tuple[float, float, datetime, int, str]] = []
     first_storm_desc = None
+    first_tz_abbrev = None
+
     for lon, lat, desc_html in raw_pts:
-        dt_local_naive, knots, storm_desc = parse_nhc_track_desc(desc_html)
+        dt_local_naive, knots, storm_desc, tz_abbrev = parse_nhc_track_desc(desc_html)
         if dt_local_naive is None or knots is None:
             continue
-        track_points.append((lon, lat, dt_local_naive, knots))
+        tz_abbrev = (tz_abbrev or "UTC").upper()
+        track_points.append((lon, lat, dt_local_naive, knots, tz_abbrev))
+
         if not first_storm_desc and storm_desc:
             first_storm_desc = storm_desc
+        if not first_tz_abbrev and tz_abbrev:
+            first_tz_abbrev = tz_abbrev
 
     if not track_points:
         raise ValueError("NHC: Could not parse any point times/winds from TRACK descriptions.")
 
+    # TOA 34 -> polygon (required)
     best_ls = extract_best_linestring(toa_doc, toa_ns)
     if not best_ls:
         raise ValueError("NHC: Could not find a TOA 34 LineString in TOA KMZ.")
     toa_polygon = linestring_to_polygon_geom(best_ls)
 
+    # Storm ID + name for filename
     storm_id = None
     storm_name = None
     if first_storm_desc:
         m = re.search(r"\(([A-Z]{2}\d{6})\)", first_storm_desc)
         if m:
             storm_id = m.group(1)
-        m2 = re.search(r"\b(?:Tropical Storm|Hurricane|Tropical Depression|Potential Tropical Cyclone)\s+([A-Za-z0-9_-]+)\s*\(", first_storm_desc, re.IGNORECASE)
+        m2 = re.search(
+            r"\b(?:Tropical Storm|Hurricane|Tropical Depression|Potential Tropical Cyclone)\s+([A-Za-z0-9_-]+)\s*\(",
+            first_storm_desc,
+            re.IGNORECASE
+        )
         if m2:
             storm_name = m2.group(1).upper()
 
@@ -731,16 +814,33 @@ def convert_nhc(track_kmz: bytes, toa34_kmz: bytes, ww_kmz: Optional[bytes]) -> 
         if m:
             storm_id = m.group(1)
 
-    # Filename time: use UTC derived from first point local time + location tz
-    first_lon, first_lat, first_local_naive, _ = track_points[0]
-    tzinfo, _abbr = tzinfo_and_abbr_from_location(first_lat, first_lon, first_local_naive, "NHC")
-    first_local = first_local_naive.replace(tzinfo=tzinfo)
-    first_utc = first_local.astimezone(timezone.utc)
-    d_h = f"{first_utc.day:02d}/{first_utc.hour:02d}Z"
+    # Filename time: convert first point's local time to UTC using tz abbrev mapping if possible
+    first_lon, first_lat, first_local_naive, _first_knots, tz_abbrev = track_points[0]
+    tz_abbrev = (tz_abbrev or "UTC").upper()
+
+    utc_dt_for_name: Optional[datetime] = None
+    if tz_abbrev in NHC_TZ_ABBREV_TO_IANA:
+        try:
+            z = ZoneInfo(NHC_TZ_ABBREV_TO_IANA[tz_abbrev])
+            utc_dt_for_name = first_local_naive.replace(tzinfo=z).astimezone(timezone.utc)
+        except Exception:
+            utc_dt_for_name = None
+
+    if utc_dt_for_name is None:
+        # fallback only for filename: use location timezone (closest land) to get a usable UTC
+        found = tzinfo_and_abbr_try(first_lat, first_lon, datetime.now(timezone.utc), "NHC")
+        if found is not None:
+            z, _ = found
+            utc_dt_for_name = first_local_naive.replace(tzinfo=z).astimezone(timezone.utc)
+        else:
+            utc_dt_for_name = first_local_naive.replace(tzinfo=timezone.utc)
+
+    d_h = f"{utc_dt_for_name.day:02d}/{utc_dt_for_name.hour:02d}Z"
 
     parts = [p for p in [storm_id, storm_name, d_h, "Cleaned Forecast"] if p]
     file_stem = " ".join(parts).strip() or "output"
 
+    # WW optional (keep all lines for now, you’ll refine later)
     ww_folder_name = None
     ww_lines: List[Tuple[str, str, List[Tuple[float, float]]]] = []
     if ww_kmz:
@@ -748,7 +848,11 @@ def convert_nhc(track_kmz: bytes, toa34_kmz: bytes, ww_kmz: Optional[bytes]) -> 
         ww_doc = get_doc(ww_root, ww_ns, "NHC WW")
         ww_folder_name = ww_doc.findtext(q(ww_ns, "name")) or "Watch/Warnings"
 
-        adv_dt_local_naive = track_points[0][2]
+        # For warnings we keep your earlier behavior: timezone based on location midpoint,
+        # BUT if that ever fails, use the first track point’s tz abbrev (advisory tz).
+        adv_local_naive = track_points[0][2]
+        adv_tz_abbrev = (track_points[0][4] or "UTC").upper()
+
         for pm in ww_doc.findall(".//" + q(ww_ns, "Placemark")):
             warn_name = (pm.findtext(q(ww_ns, "name")) or "").strip()
             coords = pm.findtext(".//" + q(ww_ns, "LineString") + "/" + q(ww_ns, "coordinates")) or ""
@@ -757,10 +861,18 @@ def convert_nhc(track_kmz: bytes, toa34_kmz: bytes, ww_kmz: Optional[bytes]) -> 
                 continue
 
             mid_lon, mid_lat = pts[len(pts) // 2]
-            tzinfo2, abbr2 = tzinfo_and_abbr_from_location(mid_lat, mid_lon, adv_dt_local_naive, "NHC")
-            adv_local = adv_dt_local_naive.replace(tzinfo=tzinfo2)
+            # try location tz for warnings
+            loc = tzinfo_and_abbr_try(mid_lat, mid_lon, datetime.now(timezone.utc), "NHC")
+            if loc is not None:
+                z, abbr = loc
+                adv_local = adv_local_naive.replace(tzinfo=z)
+                abbr_use = adv_local.tzname() or abbr
+            else:
+                # fallback: advisory tz abbrev from TRACK
+                abbr_use = adv_tz_abbrev
+                adv_local = adv_local_naive  # keep naive
 
-            warn_desc = f"{warn_name}: Advisory in place as of {adv_local.strftime('%H:%M')} {abbr2} {format_month_day_dot(adv_local)}."
+            warn_desc = f"{warn_name}: Advisory in place as of {adv_local.strftime('%H:%M')} {abbr_use} {format_month_day_dot(adv_local)}."
             ww_lines.append((warn_name, warn_desc, pts))
 
     out_kml = build_nhc_kml(
@@ -866,19 +978,21 @@ if source == "JTWC":
                 st.rerun()
 
 else:
+    st.markdown("### NHC inputs")
+    st.caption("TRACK and TOA 34 are required. Wind warnings are optional.")
 
     track = st.file_uploader(
-        "Upload TRACK.kmz (required)",
+        "TRACK KMZ — required",
         type=["kmz"],
         key=f"uploader_{st.session_state.uploader_key}_nhc_track",
     )
     toa = st.file_uploader(
-        "Upload Earliest Reasonable TOA 34.kmz (required)",
+        "TOA 34 KMZ — required",
         type=["kmz"],
         key=f"uploader_{st.session_state.uploader_key}_nhc_toa",
     )
     ww = st.file_uploader(
-        "Upload WW.kmz (optional)",
+        "Wind Warnings KMZ — optional",
         type=["kmz"],
         key=f"uploader_{st.session_state.uploader_key}_nhc_ww",
     )
@@ -898,7 +1012,7 @@ else:
         st.session_state.out_name = None
 
     if track is None or toa is None:
-        st.info("Upload both TRACK and Earliest Reasonable TOA 34 KMZ files to begin.")
+        st.info("Upload both TRACK and TOA 34 KMZ files to begin.")
     else:
         if st.session_state.out_kml is None:
             if st.button("Convert", type="primary", use_container_width=True):
