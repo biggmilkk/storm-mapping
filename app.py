@@ -292,15 +292,27 @@ def jtwc_extract_danger_swath_geometry(forecast_folder: etree._Element, ns: str)
 
 
 def jtwc_pick_agency_option2(lon: float, lat: float) -> str:
+    """
+    Updated region rules:
+      - IMD: Indian Ocean-ish (lat -40..30, lon 30E..110E)
+      - BOM/FMS: AUS + South Pacific + NZ approaches (Southern Hemisphere),
+                lon 90E..240E, lat -60..0
+      - JTWC: otherwise
+    """
     lon360 = lon % 360.0
 
     def in_box(lon360_, lat_, lon_min, lon_max, lat_min, lat_max):
         return lon_min <= lon360_ <= lon_max and lat_min <= lat_ <= lat_max
 
-    if in_box(lon360, lat, 90.0, 160.0, -40.0, 0.0):
-        return "BOM"
+    # IMD first (so it wins where boxes overlap)
     if in_box(lon360, lat, 30.0, 110.0, -40.0, 30.0):
         return "IMD"
+
+    # BOM/FMS: include Coral Sea + SW Pacific out toward/around NZ
+    # (NZ longitudes ~166E–179E and also across dateline; 240E covers to 120W)
+    if in_box(lon360, lat, 90.0, 240.0, -60.0, 0.0):
+        return "BOM"
+
     return "JTWC"
 
 
