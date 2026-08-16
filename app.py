@@ -298,6 +298,56 @@ def southern_hemisphere_fallback_zone(lon: float, lat: Optional[float]) -> Optio
 
     return None
 
+
+def west_pacific_fallback_zone(lon: float, lat: Optional[float]) -> Optional[str]:
+    """
+    Deterministic fallback for northern West Pacific offshore points when the
+    exact timezone polygon does not cover the coordinate.
+
+    This prevents all UTC+8 offshore points from defaulting to Asia/Manila just
+    because Manila appears first in PACIFIC_FALLBACK_ZONES. Taiwan/East China
+    Sea points should use CST via Asia/Taipei or Asia/Shanghai, while Luzon and
+    Philippine Sea points remain PHT via Asia/Manila.
+    """
+    if lat is None or lat < 0.0:
+        return None
+
+    lon360 = lon % 360.0
+
+    # Taiwan / Luzon Strait / waters east and north of Taiwan.
+    # Keep the southern Bashi Channel/northern Luzon points as PHT, but switch
+    # to Taiwan CST once the track is near Taiwan's latitude band.
+    if 119.0 <= lon360 <= 126.5 and 23.5 <= lat <= 27.8:
+        return "Asia/Taipei"
+
+    # East China Sea / China coast after the track moves north or west of Taiwan.
+    if 110.0 <= lon360 <= 123.5 and 22.0 <= lat <= 41.0:
+        return "Asia/Shanghai"
+
+    # Korean Peninsula / Yellow Sea.
+    if 124.0 <= lon360 <= 132.5 and 33.0 <= lat <= 43.5:
+        return "Asia/Seoul"
+
+    # Japan / Ryukyu / open waters east of Japan. Put this after Taiwan so the
+    # waters just east/northeast of Taiwan do not prematurely become JST.
+    if 126.5 <= lon360 <= 150.0 and 24.0 <= lat <= 46.0:
+        return "Asia/Tokyo"
+
+    # Philippines and nearby Philippine Sea.
+    if 115.0 <= lon360 <= 130.0 and 0.0 <= lat < 23.5:
+        return "Asia/Manila"
+
+    # Guam / Marianas.
+    if 140.0 <= lon360 <= 150.0 and 5.0 <= lat <= 23.0:
+        return "Pacific/Guam"
+
+    # Farther east/southeast West Pacific tropical areas.
+    if 130.0 <= lon360 <= 170.0 and 0.0 <= lat <= 25.0:
+        return "Pacific/Guam"
+
+    return None
+
+
 def is_bad_abbrev(abbr: Optional[str]) -> bool:
     if not abbr:
         return True
@@ -311,6 +361,9 @@ def is_bad_abbrev(abbr: Optional[str]) -> bool:
 
 DISPLAY_TZ_ABBR_ALIASES = {
     # IANA sometimes returns numeric labels for these zones. Use clearer public labels.
+    # Explicit CST labels here mean China/Taiwan Standard Time in West Pacific output.
+    "Asia/Taipei": "CST",
+    "Asia/Shanghai": "CST",
     "Asia/Aden": "AST",
     "Asia/Riyadh": "AST",
     "Asia/Muscat": "GST",
@@ -419,7 +472,7 @@ def tzinfo_and_abbr_fallback_from_group(
         preferred_zone = indian_ocean_fallback_zone(lon_norm, lat)
         candidates = INDIAN_OCEAN_FALLBACK_ZONES
     else:
-        preferred_zone = None
+        preferred_zone = west_pacific_fallback_zone(lon_norm, lat)
         candidates = PACIFIC_FALLBACK_ZONES
 
     if preferred_zone:
@@ -839,11 +892,15 @@ def convert_jtwc_kmz(raw_kmz: bytes) -> Tuple[bytes, str]:
         agency = jtwc_pick_agency_option2(lon, lat)
         category = classify_wind_nhc(knots) if agency == "NHC" else classify_wind_table(knots, agency)
 
-        # Prefer an exact timezone polygon when the point is clearly inside one.
-        # For offshore points, use the current coordinate's basin fallback instead
-        # of blindly carrying forward a previous timezone. This prevents HST/CDT/IST
-        # from sticking after the track crosses into a different basin or longitude zone.
-        found = tzinfo_and_abbr_exact(lat, lon, utc_dt)
+        # For WPAC JTWC files, apply deterministic proximity rules first for
+        # offshore Taiwan / East China Sea transition points. Offset-only scoring
+        # cannot distinguish Manila, Taipei, and Shanghai because all are UTC+8.
+        preferred_wpac_zone = west_pacific_fallback_zone(lon, lat) if agency == "JTWC" else None
+        found = (
+            tzinfo_and_abbr_from_tzname(preferred_wpac_zone, utc_dt)
+            if preferred_wpac_zone
+            else tzinfo_and_abbr_exact(lat, lon, utc_dt)
+        )
 
         if found is not None:
             tzinfo, abbr = found
