@@ -77,22 +77,45 @@ def safe_filename(stem: str, fallback: str = "output") -> str:
 # Timezone (location lookup) + JTWC carry-forward support
 # =========================
 INDIAN_OCEAN_FALLBACK_ZONES = [
+    "Asia/Aden",
+    "Asia/Riyadh",
+    "Asia/Muscat",
+    "Asia/Dubai",
+    "Asia/Karachi",
+    "Asia/Kolkata",
+    "Asia/Colombo",
+    "Asia/Dhaka",
+    "Asia/Yangon",
+    "Indian/Maldives",
+    "Indian/Chagos",
+    "Indian/Cocos",
+    "Indian/Christmas",
     "Indian/Antananarivo",
     "Indian/Reunion",
     "Indian/Mauritius",
     "Indian/Mayotte",
     "Indian/Mahe",
-    "Asia/Dubai",
     "Africa/Nairobi",
 ]
-AU_FALLBACK_ZONES = [
+SOUTHERN_HEMISPHERE_FALLBACK_ZONES = [
+    # Australia / eastern Indian Ocean
+    "Australia/Perth",
+    "Australia/Darwin",
     "Australia/Brisbane",
     "Australia/Sydney",
     "Australia/Melbourne",
     "Australia/Hobart",
     "Australia/Adelaide",
-    "Australia/Darwin",
-    "Australia/Perth",
+    # Southwest Pacific island regions
+    "Pacific/Port_Moresby",
+    "Pacific/Noumea",
+    "Pacific/Efate",
+    "Pacific/Fiji",
+    "Pacific/Tongatapu",
+    "Pacific/Auckland",
+    "Pacific/Rarotonga",
+    "Pacific/Tahiti",
+    "Pacific/Pago_Pago",
 ]
 PACIFIC_FALLBACK_ZONES = [
     "Asia/Manila",
@@ -106,7 +129,8 @@ PACIFIC_FALLBACK_ZONES = [
     "Pacific/Fiji",
     "Pacific/Honolulu",
 ]
-AMERICAS_FALLBACK_ZONES = [
+NHC_CPHC_FALLBACK_ZONES = [
+    # Atlantic / Caribbean / Gulf / North America
     "America/Chicago",
     "America/New_York",
     "America/Nassau",
@@ -115,6 +139,7 @@ AMERICAS_FALLBACK_ZONES = [
     "America/Cancun",
     "America/Merida",
     "America/Mexico_City",
+    "America/Costa_Rica",
     "America/Monterrey",
     "America/Mazatlan",
     "America/Hermosillo",
@@ -123,6 +148,11 @@ AMERICAS_FALLBACK_ZONES = [
     "America/Halifax",
     "America/Toronto",
     "Atlantic/Bermuda",
+    "Atlantic/Cape_Verde",
+    "Africa/Dakar",
+    "Africa/Abidjan",
+    "Africa/Lagos",
+    # Central Pacific
     "Pacific/Honolulu",
 ]
 
@@ -134,17 +164,20 @@ def zoneinfo_abbr(tzi: ZoneInfo, dt_utc: datetime) -> str:
 
 def nhc_basin_fallback_zone(lon: float, lat: Optional[float]) -> Optional[str]:
     """
-    Deterministic fallback for NHC/CPHC basins when timezonefinder cannot
-    identify an offshore time zone. This avoids classifying Gulf of Mexico or
-    Atlantic points as Pacific/Honolulu just because they are over water.
+    Deterministic fallback for Atlantic, eastern Pacific, and central Pacific
+    points when timezonefinder cannot identify an offshore timezone polygon.
+
+    This is used for JTWC-style UTC files that contain NHC/CPHC-basin storms
+    and as a safety fallback for NHC files with missing timezone text. Official
+    NHC/CPHC advisory timezone text still wins when it is present.
     """
     lon_norm = normalize_lon_180(lon)
 
-    if lat is None:
+    if lat is None or lat < 0.0:
         return None
 
-    # Gulf of Mexico / US Gulf Coast.  Most points west of the Florida Big Bend
-    # should display Central time; points east of that stay Eastern.
+    # Gulf of Mexico / US Gulf Coast. Most points west of the Florida Big Bend
+    # display Central time; points east of that display Eastern time.
     if 18.0 <= lat <= 32.5 and -98.5 <= lon_norm <= -80.0:
         return "America/Chicago" if lon_norm <= -85.0 else "America/New_York"
 
@@ -156,20 +189,114 @@ def nhc_basin_fallback_zone(lon: float, lat: Optional[float]) -> Optional[str]:
     if 20.0 <= lat <= 45.0 and -80.0 <= lon_norm <= -50.0:
         return "Atlantic/Bermuda" if lon_norm >= -65.0 else "America/New_York"
 
+    # Central and eastern Atlantic, including Cabo Verde-type systems.
+    if 0.0 <= lat <= 45.0 and -50.0 <= lon_norm <= 20.0:
+        if lon_norm < -30.0:
+            return "Atlantic/Bermuda"
+        if lon_norm < -15.0:
+            return "Atlantic/Cape_Verde"
+        if lon_norm < 5.0:
+            return "Africa/Dakar"
+        return "Africa/Lagos"
+
     # Central Pacific tropical cyclone area.
     if 0.0 <= lat <= 40.0 and -180.0 <= lon_norm < -140.0:
         return "Pacific/Honolulu"
 
     # Eastern Pacific off Mexico / Central America.
-    if 0.0 <= lat <= 35.0 and -140.0 <= lon_norm < -100.0:
+    if 0.0 <= lat <= 35.0 and -140.0 <= lon_norm < -80.0:
         if lon_norm <= -118.0:
             return "America/Los_Angeles"
         if lon_norm <= -105.0:
             return "America/Mazatlan"
-        return "America/Mexico_City"
+        if lon_norm <= -92.0:
+            return "America/Mexico_City"
+        return "America/Costa_Rica"
 
     return None
 
+def indian_ocean_fallback_zone(lon: float, lat: Optional[float]) -> Optional[str]:
+    """
+    Deterministic fallback for Indian Ocean / Arabian Sea / Bay of Bengal
+    points when the coordinate is offshore and timezonefinder has no exact
+    timezone polygon. This is a coordinate-local display rule, not an official
+    agency-advisory-time rule.
+    """
+    if lat is None:
+        return None
+
+    lon360 = lon % 360.0
+
+    if not (30.0 <= lon360 <= 110.0 and -40.0 <= lat <= 30.0):
+        return None
+
+    if lat >= 0.0:
+        # North Indian Ocean, Arabian Sea, and Bay of Bengal.
+        if lon360 < 50.0:
+            return "Asia/Aden"
+        if lon360 < 62.0:
+            return "Asia/Muscat"
+        if lon360 < 70.0:
+            return "Asia/Karachi"
+        if lon360 < 82.0:
+            return "Asia/Kolkata"
+        if lon360 < 91.0:
+            return "Asia/Dhaka"
+        if lon360 < 100.0:
+            return "Asia/Yangon"
+        return "Asia/Bangkok"
+
+    # South Indian Ocean.
+    if lon360 < 50.0:
+        return "Indian/Antananarivo"
+    if lon360 < 61.0:
+        return "Indian/Reunion"
+    if lon360 < 70.0:
+        return "Indian/Mauritius"
+    if lon360 < 80.0:
+        return "Indian/Maldives" if lat > -12.0 else "Indian/Chagos"
+    if lon360 < 98.0:
+        return "Indian/Chagos"
+    if lon360 < 106.0:
+        return "Indian/Cocos"
+    return "Indian/Christmas"
+
+
+
+
+def southern_hemisphere_fallback_zone(lon: float, lat: Optional[float]) -> Optional[str]:
+    """
+    Deterministic fallback for Australian, South Indian, and South Pacific
+    offshore points. This prevents a southern-hemisphere JTWC file from using
+    only Australian zones for Fiji/Tonga/Tahiti-side systems.
+    """
+    if lat is None or lat > 0.0:
+        return None
+
+    lon360 = lon % 360.0
+
+    if 90.0 <= lon360 < 115.0:
+        return "Australia/Perth"
+    if 115.0 <= lon360 < 132.0:
+        return "Australia/Darwin"
+    if 132.0 <= lon360 < 148.0:
+        return "Australia/Brisbane"
+    if 148.0 <= lon360 < 155.0:
+        return "Pacific/Port_Moresby"
+    if 155.0 <= lon360 < 168.0:
+        return "Pacific/Noumea"
+    if 168.0 <= lon360 < 180.0:
+        return "Pacific/Fiji"
+    if 180.0 <= lon360 < 195.0:
+        return "Pacific/Fiji"
+    if 195.0 <= lon360 < 210.0:
+        return "Pacific/Tongatapu"
+    if 210.0 <= lon360 < 225.0:
+        return "Pacific/Rarotonga"
+    if 225.0 <= lon360 <= 240.0:
+        return "Pacific/Tahiti"
+
+    return None
 
 def is_bad_abbrev(abbr: Optional[str]) -> bool:
     if not abbr:
@@ -182,34 +309,96 @@ def is_bad_abbrev(abbr: Optional[str]) -> bool:
     return False
 
 
+DISPLAY_TZ_ABBR_ALIASES = {
+    # IANA sometimes returns numeric labels for these zones. Use clearer public labels.
+    "Asia/Aden": "AST",
+    "Asia/Riyadh": "AST",
+    "Asia/Muscat": "GST",
+    "Asia/Dubai": "GST",
+    "Asia/Karachi": "PKT",
+    "Asia/Kolkata": "IST",
+    "Asia/Colombo": "SLST",
+    "Asia/Dhaka": "BST",
+    "Asia/Yangon": "MMT",
+    "Asia/Bangkok": "ICT",
+    "Indian/Maldives": "MVT",
+    "Indian/Chagos": "IOT",
+    "Indian/Cocos": "CCT",
+    "Indian/Christmas": "CXT",
+    "Indian/Reunion": "RET",
+    "Indian/Mauritius": "MUT",
+    "Indian/Mahe": "SCT",
+    "Atlantic/Cape_Verde": "CVT",
+    "Africa/Dakar": "GMT",
+    "Africa/Abidjan": "GMT",
+    "Africa/Lagos": "WAT",
+    "Pacific/Port_Moresby": "PGT",
+    "Pacific/Noumea": "NCT",
+    "Pacific/Efate": "VUT",
+    "Pacific/Fiji": "FJT",
+    "Pacific/Tongatapu": "TOT",
+    "Pacific/Rarotonga": "CKT",
+    "Pacific/Tahiti": "TAHT",
+    "Pacific/Pago_Pago": "SST",
+}
+
+
 def display_tz_abbr(tzname: Optional[str], abbr: Optional[str]) -> str:
     """
-    Keep the time conversion from IANA/ZoneInfo, but clean up ambiguous display labels.
-
-    IANA uses the abbreviation "PST" for Asia/Manila. In public-facing storm
-    products for the Philippines, "PHT" is clearer because "PST" is often read
-    as Pacific Standard Time. This is deliberately zone-specific so NHC Pacific
-    Standard Time remains PST.
+    Keep the time conversion from IANA/ZoneInfo, but clean up ambiguous or
+    numeric display labels. The conversion still comes from ZoneInfo; this only
+    changes what gets printed in the KML description.
     """
     a = (abbr or "").strip()
+
+    # IANA uses "PST" for Asia/Manila. For public-facing Philippines output,
+    # "PHT" is clearer and avoids confusion with Pacific Standard Time.
     if tzname == "Asia/Manila" and a.upper() == "PST":
         return "PHT"
-    return a
+
+    alias = DISPLAY_TZ_ABBR_ALIASES.get(tzname or "")
+    if alias and (not a or re.fullmatch(r"[+-]\d{1,2}(:?\d{2})?", a)):
+        return alias
+
+    return alias or a
+
+
+def tzinfo_and_abbr_from_tzname(tzname: Optional[str], dt_utc: datetime) -> Optional[Tuple[ZoneInfo, str]]:
+    if not tzname:
+        return None
+    try:
+        tzi = ZoneInfo(tzname)
+        abbr = dt_utc.astimezone(tzi).tzname()
+        abbr = display_tz_abbr(tzname, abbr)
+        if not is_bad_abbrev(abbr):
+            return tzi, abbr
+    except Exception:
+        pass
+    return None
+
+
+def tzinfo_and_abbr_exact(lat: float, lon: float, dt_utc: datetime) -> Optional[Tuple[ZoneInfo, str]]:
+    """Use only the timezone polygon at the point, not the nearest land zone."""
+    lon_norm = normalize_lon_180(lon)
+    try:
+        tzname = TF.timezone_at(lat=lat, lng=lon_norm)
+    except Exception:
+        tzname = None
+    return tzinfo_and_abbr_from_tzname(tzname, dt_utc)
+
+
+def tzinfo_and_abbr_closest(lat: float, lon: float, dt_utc: datetime) -> Optional[Tuple[ZoneInfo, str]]:
+    """Last-resort nearest timezone lookup for locations outside exact polygons."""
+    lon_norm = normalize_lon_180(lon)
+    try:
+        tzname = TF.closest_timezone_at(lat=lat, lng=lon_norm)
+    except Exception:
+        tzname = None
+    return tzinfo_and_abbr_from_tzname(tzname, dt_utc)
 
 
 def tzinfo_and_abbr_try(lat: float, lon: float, dt_utc: datetime) -> Optional[Tuple[ZoneInfo, str]]:
-    lon_norm = normalize_lon_180(lon)
-    tzname = TF.timezone_at(lat=lat, lng=lon_norm) or TF.closest_timezone_at(lat=lat, lng=lon_norm)
-    if tzname:
-        try:
-            tzi = ZoneInfo(tzname)
-            abbr = dt_utc.astimezone(tzi).tzname()
-            abbr = display_tz_abbr(tzname, abbr)
-            if not is_bad_abbrev(abbr):
-                return tzi, abbr
-        except Exception:
-            pass
-    return None
+    return tzinfo_and_abbr_exact(lat, lon, dt_utc) or tzinfo_and_abbr_closest(lat, lon, dt_utc)
 
 
 def tzinfo_and_abbr_fallback_from_group(
@@ -222,19 +411,23 @@ def tzinfo_and_abbr_fallback_from_group(
 
     if group == "NHC":
         preferred_zone = nhc_basin_fallback_zone(lon_norm, lat)
-        if preferred_zone:
-            try:
-                tzi = ZoneInfo(preferred_zone)
-                return tzi, zoneinfo_abbr(tzi, dt_utc)
-            except Exception:
-                pass
-        candidates = AMERICAS_FALLBACK_ZONES
+        candidates = NHC_CPHC_FALLBACK_ZONES
     elif group == "BOM":
-        candidates = AU_FALLBACK_ZONES
+        preferred_zone = southern_hemisphere_fallback_zone(lon_norm, lat)
+        candidates = SOUTHERN_HEMISPHERE_FALLBACK_ZONES
     elif group == "IMD":
+        preferred_zone = indian_ocean_fallback_zone(lon_norm, lat)
         candidates = INDIAN_OCEAN_FALLBACK_ZONES
     else:
+        preferred_zone = None
         candidates = PACIFIC_FALLBACK_ZONES
+
+    if preferred_zone:
+        try:
+            tzi = ZoneInfo(preferred_zone)
+            return tzi, zoneinfo_abbr(tzi, dt_utc)
+        except Exception:
+            pass
 
     approx_off = round(lon_norm / 15.0)
     best = None
@@ -391,9 +584,11 @@ def jtwc_pick_agency_option2(lon: float, lat: float) -> str:
     def in_box(lon360_, lat_, lon_min, lon_max, lat_min, lat_max):
         return lon_min <= lon360_ <= lon_max and lat_min <= lat_ <= lat_max
 
-    # NHC / CPHC basins. This prevents Atlantic or Gulf points from falling
-    # through to the Pacific JTWC fallback list and being labeled HST.
-    if lat >= 0.0 and lon_norm <= -20.0:
+    # NHC / CPHC basins. Treat this as basin detection, not source detection.
+    # It covers the Atlantic through Cabo Verde / West Africa, the Gulf,
+    # Caribbean, eastern Pacific, and central Pacific. This prevents worldwide
+    # JTWC-format files in these basins from falling through to WPAC defaults.
+    if 0.0 <= lat <= 50.0 and -180.0 <= lon_norm <= 20.0:
         return "NHC"
 
     # IMD first where eastern-basin boxes overlap.
@@ -644,19 +839,18 @@ def convert_jtwc_kmz(raw_kmz: bytes) -> Tuple[bytes, str]:
         agency = jtwc_pick_agency_option2(lon, lat)
         category = classify_wind_nhc(knots) if agency == "NHC" else classify_wind_table(knots, agency)
 
-        found = tzinfo_and_abbr_try(lat, lon, utc_dt)
+        # Prefer an exact timezone polygon when the point is clearly inside one.
+        # For offshore points, use the current coordinate's basin fallback instead
+        # of blindly carrying forward a previous timezone. This prevents HST/CDT/IST
+        # from sticking after the track crosses into a different basin or longitude zone.
+        found = tzinfo_and_abbr_exact(lat, lon, utc_dt)
 
         if found is not None:
             tzinfo, abbr = found
             last_tzinfo, last_abbr = tzinfo, abbr
         else:
-            if last_tzinfo is not None:
-                tzinfo = last_tzinfo
-                abbr = zoneinfo_abbr(tzinfo, utc_dt)
-                last_abbr = abbr
-            else:
-                tzinfo, abbr = tzinfo_and_abbr_fallback_from_group(utc_dt, lon, agency, lat)
-                last_tzinfo, last_abbr = tzinfo, abbr
+            tzinfo, abbr = tzinfo_and_abbr_fallback_from_group(utc_dt, lon, agency, lat)
+            last_tzinfo, last_abbr = tzinfo, abbr
 
         local_dt = utc_dt.astimezone(tzinfo)
         kph, mph = knots_to_kph_mph(knots)
