@@ -30,6 +30,15 @@ KML_NS_22 = "http://www.opengis.net/kml/2.2"
 NSMAP_22 = {None: KML_NS_22}
 TF = TimezoneFinder()
 
+# KML has no true <MultiPolygon>; the standards-compliant multi-part form is
+# <Placemark><MultiGeometry><Polygon>...</Polygon>...</MultiGeometry></Placemark>.
+# Some downstream map importers explode MultiGeometry into separate legend rows.
+# To force one legend row in those tools, use the dateline-seamed single Polygon
+# mode below. Change to "multigeometry" if your target renderer preserves one
+# legend item for a KML MultiGeometry.
+ANTIMERIDIAN_SPLIT_MODE = "single_legend_polygon"
+# ANTIMERIDIAN_SPLIT_MODE = "multigeometry"
+
 MONTH_DOT = {
     1: "Jan.", 2: "Feb.", 3: "Mar.", 4: "Apr.", 5: "May.", 6: "Jun.",
     7: "Jul.", 8: "Aug.", 9: "Sep.", 10: "Oct.", 11: "Nov.", 12: "Dec."
@@ -97,8 +106,8 @@ INDIAN_OCEAN_FALLBACK_ZONES = [
     "Indian/Mahe",
     "Africa/Nairobi",
 ]
-
 SOUTHERN_HEMISPHERE_FALLBACK_ZONES = [
+    # Australia / eastern Indian Ocean
     "Australia/Perth",
     "Australia/Darwin",
     "Australia/Brisbane",
@@ -106,6 +115,7 @@ SOUTHERN_HEMISPHERE_FALLBACK_ZONES = [
     "Australia/Melbourne",
     "Australia/Hobart",
     "Australia/Adelaide",
+    # Southwest Pacific island regions
     "Pacific/Port_Moresby",
     "Pacific/Noumea",
     "Pacific/Efate",
@@ -116,7 +126,6 @@ SOUTHERN_HEMISPHERE_FALLBACK_ZONES = [
     "Pacific/Tahiti",
     "Pacific/Pago_Pago",
 ]
-
 PACIFIC_FALLBACK_ZONES = [
     "Asia/Manila",
     "Asia/Tokyo",
@@ -129,8 +138,8 @@ PACIFIC_FALLBACK_ZONES = [
     "Pacific/Fiji",
     "Pacific/Honolulu",
 ]
-
 NHC_CPHC_FALLBACK_ZONES = [
+    # Atlantic / Caribbean / Gulf / North America
     "America/Chicago",
     "America/New_York",
     "America/Nassau",
@@ -152,6 +161,7 @@ NHC_CPHC_FALLBACK_ZONES = [
     "Africa/Dakar",
     "Africa/Abidjan",
     "Africa/Lagos",
+    # Central Pacific
     "Pacific/Honolulu",
 ]
 
@@ -165,21 +175,30 @@ def nhc_basin_fallback_zone(lon: float, lat: Optional[float]) -> Optional[str]:
     """
     Deterministic fallback for Atlantic, eastern Pacific, and central Pacific
     points when timezonefinder cannot identify an offshore timezone polygon.
+
+    This is used for JTWC-style UTC files that contain NHC/CPHC-basin storms
+    and as a safety fallback for NHC files with missing timezone text. Official
+    NHC/CPHC advisory timezone text still wins when it is present.
     """
     lon_norm = normalize_lon_180(lon)
 
     if lat is None or lat < 0.0:
         return None
 
+    # Gulf of Mexico / US Gulf Coast. Most points west of the Florida Big Bend
+    # display Central time; points east of that display Eastern time.
     if 18.0 <= lat <= 32.5 and -98.5 <= lon_norm <= -80.0:
         return "America/Chicago" if lon_norm <= -85.0 else "America/New_York"
 
+    # Caribbean and nearby western Atlantic.
     if 5.0 <= lat <= 25.5 and -85.0 <= lon_norm <= -58.0:
         return "America/Puerto_Rico" if lon_norm >= -70.0 else "America/New_York"
 
+    # Bahamas / Bermuda / western subtropical Atlantic.
     if 20.0 <= lat <= 45.0 and -80.0 <= lon_norm <= -50.0:
         return "Atlantic/Bermuda" if lon_norm >= -65.0 else "America/New_York"
 
+    # Central and eastern Atlantic, including Cabo Verde-type systems.
     if 0.0 <= lat <= 45.0 and -50.0 <= lon_norm <= 20.0:
         if lon_norm < -30.0:
             return "Atlantic/Bermuda"
@@ -189,9 +208,11 @@ def nhc_basin_fallback_zone(lon: float, lat: Optional[float]) -> Optional[str]:
             return "Africa/Dakar"
         return "Africa/Lagos"
 
+    # Central Pacific tropical cyclone area.
     if 0.0 <= lat <= 40.0 and -180.0 <= lon_norm < -140.0:
         return "Pacific/Honolulu"
 
+    # Eastern Pacific off Mexico / Central America.
     if 0.0 <= lat <= 35.0 and -140.0 <= lon_norm < -80.0:
         if lon_norm <= -118.0:
             return "America/Los_Angeles"
@@ -203,10 +224,12 @@ def nhc_basin_fallback_zone(lon: float, lat: Optional[float]) -> Optional[str]:
 
     return None
 
-
 def indian_ocean_fallback_zone(lon: float, lat: Optional[float]) -> Optional[str]:
     """
-    Deterministic fallback for Indian Ocean / Arabian Sea / Bay of Bengal points.
+    Deterministic fallback for Indian Ocean / Arabian Sea / Bay of Bengal
+    points when the coordinate is offshore and timezonefinder has no exact
+    timezone polygon. This is a coordinate-local display rule, not an official
+    agency-advisory-time rule.
     """
     if lat is None:
         return None
@@ -217,6 +240,7 @@ def indian_ocean_fallback_zone(lon: float, lat: Optional[float]) -> Optional[str
         return None
 
     if lat >= 0.0:
+        # North Indian Ocean, Arabian Sea, and Bay of Bengal.
         if lon360 < 50.0:
             return "Asia/Aden"
         if lon360 < 62.0:
@@ -231,6 +255,7 @@ def indian_ocean_fallback_zone(lon: float, lat: Optional[float]) -> Optional[str
             return "Asia/Yangon"
         return "Asia/Bangkok"
 
+    # South Indian Ocean.
     if lon360 < 50.0:
         return "Indian/Antananarivo"
     if lon360 < 61.0:
@@ -243,13 +268,16 @@ def indian_ocean_fallback_zone(lon: float, lat: Optional[float]) -> Optional[str
         return "Indian/Chagos"
     if lon360 < 106.0:
         return "Indian/Cocos"
-
     return "Indian/Christmas"
+
+
 
 
 def southern_hemisphere_fallback_zone(lon: float, lat: Optional[float]) -> Optional[str]:
     """
-    Deterministic fallback for Australian, South Indian, and South Pacific points.
+    Deterministic fallback for Australian, South Indian, and South Pacific
+    offshore points. This prevents a southern-hemisphere JTWC file from using
+    only Australian zones for Fiji/Tonga/Tahiti-side systems.
     """
     if lat is None or lat > 0.0:
         return None
@@ -282,31 +310,47 @@ def southern_hemisphere_fallback_zone(lon: float, lat: Optional[float]) -> Optio
 
 def west_pacific_fallback_zone(lon: float, lat: Optional[float]) -> Optional[str]:
     """
-    Deterministic fallback for northern West Pacific offshore points.
+    Deterministic fallback for northern West Pacific offshore points when the
+    exact timezone polygon does not cover the coordinate.
+
+    This prevents all UTC+8 offshore points from defaulting to Asia/Manila just
+    because Manila appears first in PACIFIC_FALLBACK_ZONES. Taiwan/East China
+    Sea points should use CST via Asia/Taipei or Asia/Shanghai, while Luzon and
+    Philippine Sea points remain PHT via Asia/Manila.
     """
     if lat is None or lat < 0.0:
         return None
 
     lon360 = lon % 360.0
 
+    # Taiwan / Luzon Strait / waters east and north of Taiwan.
+    # Keep the southern Bashi Channel/northern Luzon points as PHT, but switch
+    # to Taiwan CST once the track is near Taiwan's latitude band.
     if 119.0 <= lon360 <= 126.5 and 23.5 <= lat <= 27.8:
         return "Asia/Taipei"
 
+    # East China Sea / China coast after the track moves north or west of Taiwan.
     if 110.0 <= lon360 <= 123.5 and 22.0 <= lat <= 41.0:
         return "Asia/Shanghai"
 
+    # Korean Peninsula / Yellow Sea.
     if 124.0 <= lon360 <= 132.5 and 33.0 <= lat <= 43.5:
         return "Asia/Seoul"
 
+    # Japan / Ryukyu / open waters east of Japan. Put this after Taiwan so the
+    # waters just east/northeast of Taiwan do not prematurely become JST.
     if 126.5 <= lon360 <= 150.0 and 24.0 <= lat <= 46.0:
         return "Asia/Tokyo"
 
+    # Philippines and nearby Philippine Sea.
     if 115.0 <= lon360 <= 130.0 and 0.0 <= lat < 23.5:
         return "Asia/Manila"
 
+    # Guam / Marianas.
     if 140.0 <= lon360 <= 150.0 and 5.0 <= lat <= 23.0:
         return "Pacific/Guam"
 
+    # Farther east/southeast West Pacific tropical areas.
     if 130.0 <= lon360 <= 170.0 and 0.0 <= lat <= 25.0:
         return "Pacific/Guam"
 
@@ -316,19 +360,17 @@ def west_pacific_fallback_zone(lon: float, lat: Optional[float]) -> Optional[str
 def is_bad_abbrev(abbr: Optional[str]) -> bool:
     if not abbr:
         return True
-
     a = abbr.strip()
-
     if re.fullmatch(r"[+-]\d{1,2}(:\d{2})?", a):
         return True
-
     if a.upper().startswith(("UTC", "GMT")) and re.search(r"[+-]\d", a):
         return True
-
     return False
 
 
 DISPLAY_TZ_ABBR_ALIASES = {
+    # IANA sometimes returns numeric labels for these zones. Use clearer public labels.
+    # Explicit CST labels here mean China/Taiwan Standard Time in West Pacific output.
     "Asia/Taipei": "CST",
     "Asia/Shanghai": "CST",
     "Asia/Aden": "AST",
@@ -365,10 +407,14 @@ DISPLAY_TZ_ABBR_ALIASES = {
 
 def display_tz_abbr(tzname: Optional[str], abbr: Optional[str]) -> str:
     """
-    Keep the time conversion from IANA/ZoneInfo, but clean up ambiguous or numeric labels.
+    Keep the time conversion from IANA/ZoneInfo, but clean up ambiguous or
+    numeric display labels. The conversion still comes from ZoneInfo; this only
+    changes what gets printed in the KML description.
     """
     a = (abbr or "").strip()
 
+    # IANA uses "PST" for Asia/Manila. For public-facing Philippines output,
+    # "PHT" is clearer and avoids confusion with Pacific Standard Time.
     if tzname == "Asia/Manila" and a.upper() == "PST":
         return "PHT"
 
@@ -382,39 +428,34 @@ def display_tz_abbr(tzname: Optional[str], abbr: Optional[str]) -> str:
 def tzinfo_and_abbr_from_tzname(tzname: Optional[str], dt_utc: datetime) -> Optional[Tuple[ZoneInfo, str]]:
     if not tzname:
         return None
-
     try:
         tzi = ZoneInfo(tzname)
         abbr = dt_utc.astimezone(tzi).tzname()
         abbr = display_tz_abbr(tzname, abbr)
-
         if not is_bad_abbrev(abbr):
             return tzi, abbr
     except Exception:
         pass
-
     return None
 
 
 def tzinfo_and_abbr_exact(lat: float, lon: float, dt_utc: datetime) -> Optional[Tuple[ZoneInfo, str]]:
+    """Use only the timezone polygon at the point, not the nearest land zone."""
     lon_norm = normalize_lon_180(lon)
-
     try:
         tzname = TF.timezone_at(lat=lat, lng=lon_norm)
     except Exception:
         tzname = None
-
     return tzinfo_and_abbr_from_tzname(tzname, dt_utc)
 
 
 def tzinfo_and_abbr_closest(lat: float, lon: float, dt_utc: datetime) -> Optional[Tuple[ZoneInfo, str]]:
+    """Last-resort nearest timezone lookup for locations outside exact polygons."""
     lon_norm = normalize_lon_180(lon)
-
     try:
         tzname = TF.closest_timezone_at(lat=lat, lng=lon_norm)
     except Exception:
         tzname = None
-
     return tzinfo_and_abbr_from_tzname(tzname, dt_utc)
 
 
@@ -482,14 +523,28 @@ def tzinfo_and_abbr_fallback_from_group(
 # KMZ / KML helpers
 # =========================
 def read_kmz_kml_bytes(kmz_bytes: bytes) -> bytes:
-    with zipfile.ZipFile(io.BytesIO(kmz_bytes), "r") as z:
-        names = z.namelist()
-        kml_name = "doc.kml" if "doc.kml" in names else next((n for n in names if n.lower().endswith(".kml")), None)
+    """Return KML bytes from either a KMZ archive or a raw KML upload.
 
-        if not kml_name:
-            raise ValueError("No .kml found inside KMZ.")
+    The app mostly receives KMZ files, but JTWC/global cleaned products may be
+    passed around as plain .kml. Supporting both avoids filename/metadata loss
+    when a previously cleaned KML is used as the next source file.
+    """
+    head = (kmz_bytes or b"")[:200].lstrip()
 
-        return z.read(kml_name)
+    if head.startswith(b"<?xml") or head.startswith(b"<kml"):
+        return kmz_bytes
+
+    try:
+        with zipfile.ZipFile(io.BytesIO(kmz_bytes), "r") as z:
+            names = z.namelist()
+            kml_name = "doc.kml" if "doc.kml" in names else next((n for n in names if n.lower().endswith(".kml")), None)
+
+            if not kml_name:
+                raise ValueError("No .kml found inside KMZ.")
+
+            return z.read(kml_name)
+    except zipfile.BadZipFile as exc:
+        raise ValueError("Input is not a valid KMZ archive or raw KML file.") from exc
 
 
 def parse_xml_bytes(xml_bytes: bytes) -> etree._Element:
@@ -506,10 +561,8 @@ def load_kmz_root(kmz_bytes: bytes) -> Tuple[etree._Element, str]:
 
 def get_doc(root: etree._Element, ns: str, label: str) -> etree._Element:
     doc = root.find(".//" + q(ns, "Document"))
-
     if doc is None:
         raise ValueError(f"{label}: No <Document> found in KML.")
-
     return doc
 
 
@@ -532,7 +585,6 @@ def first_descendant_by_local(el: etree._Element, tag_name: str) -> Optional[etr
     for child in el.iter():
         if isinstance(child.tag, str) and kml_local_name(child) == tag_name:
             return child
-
     return None
 
 
@@ -548,7 +600,6 @@ def parse_kml_coord_ring(coord_text: str) -> List[Coord3]:
 
     for tok in (coord_text or "").replace("\n", " ").split():
         parts = tok.split(",")
-
         if len(parts) < 2:
             continue
 
@@ -567,7 +618,6 @@ def parse_kml_coord_ring(coord_text: str) -> List[Coord3]:
 def fmt_kml_float(value: float) -> str:
     if abs(value) < 1.0e-10:
         value = 0.0
-
     s = f"{value:.8f}".rstrip("0").rstrip(".")
     return s if s else "0"
 
@@ -588,10 +638,8 @@ def close_ring(ring: List[Coord3]) -> List[Coord3]:
         return []
 
     out = list(ring)
-
     if not same_xy(out[0], out[-1]):
         out.append(out[0])
-
     return out
 
 
@@ -610,10 +658,8 @@ def dedupe_consecutive(ring: List[Coord3]) -> List[Coord3]:
 
 def unique_xy_count(ring: List[Coord3]) -> int:
     seen = set()
-
     for lon, lat, _alt in ring:
         seen.add((round(lon, 8), round(lat, 8)))
-
     return len(seen)
 
 
@@ -654,14 +700,13 @@ def ring_crosses_antimeridian(ring: List[Coord3]) -> bool:
 def lon_to_360_for_dateline(lon: float) -> float:
     lon_norm = normalize_lon_180(lon)
 
+    # Treat both +180 and -180 as the cutting meridian.
     if abs(abs(lon) - 180.0) <= 1.0e-7 or abs(abs(lon_norm) - 180.0) <= 1.0e-7:
         return ANTIMERIDIAN_LON
 
     lon360 = lon_norm % 360.0
-
     if abs(lon360 - 360.0) <= GEOM_EPS:
         lon360 = 0.0
-
     return lon360
 
 
@@ -679,7 +724,6 @@ def interpolate_at_lon(p1: Coord3, p2: Coord3, boundary_lon: float = ANTIMERIDIA
     t = (boundary_lon - lon1) / (lon2 - lon1)
     lat = lat1 + t * (lat2 - lat1)
     alt = alt1 + t * (alt2 - alt1)
-
     return (boundary_lon, lat, alt)
 
 
@@ -692,14 +736,12 @@ def clip_ring_at_antimeridian_half(ring360: List[Coord3], keep_left: bool) -> Li
         return []
 
     vertices = ring360[:-1] if same_xy(ring360[0], ring360[-1]) else ring360
-
     if len(vertices) < 3:
         return []
 
     def inside(pt: Coord3) -> bool:
         if keep_left:
             return pt[0] <= ANTIMERIDIAN_LON + GEOM_EPS
-
         return pt[0] >= ANTIMERIDIAN_LON - GEOM_EPS
 
     out: List[Coord3] = []
@@ -732,8 +774,10 @@ def convert_split_ring_to_kml_longitudes(ring360: List[Coord3], keep_left: bool)
 
     for lon, lat, alt in ring360:
         if keep_left:
+            # East-longitude side of the map. Keep the cut edge as +180.
             lon_out = ANTIMERIDIAN_LON if abs(lon - ANTIMERIDIAN_LON) <= 1.0e-7 else lon
         else:
+            # West-longitude side of the map. Keep the cut edge as -180.
             lon_out = -ANTIMERIDIAN_LON if abs(lon - ANTIMERIDIAN_LON) <= 1.0e-7 else lon - 360.0
 
         out.append((lon_out, lat, alt))
@@ -743,12 +787,10 @@ def convert_split_ring_to_kml_longitudes(ring360: List[Coord3], keep_left: bool)
 
 def polygon_outer_ring(poly: etree._Element) -> Optional[List[Coord3]]:
     outer = first_descendant_by_local(poly, "outerBoundaryIs")
-
     if outer is None:
         return None
 
     coords_el = first_descendant_by_local(outer, "coordinates")
-
     if coords_el is None:
         return None
 
@@ -763,12 +805,9 @@ def polygon_inner_rings(poly: etree._Element) -> List[List[Coord3]]:
 
     for inner in [el for el in poly.iter() if isinstance(el.tag, str) and kml_local_name(el) == "innerBoundaryIs"]:
         coords_el = first_descendant_by_local(inner, "coordinates")
-
         if coords_el is None:
             continue
-
         ring = close_ring(dedupe_consecutive(parse_kml_coord_ring(coords_el.text or "")))
-
         if len(ring) >= 4:
             rings.append(ring)
 
@@ -778,10 +817,8 @@ def polygon_inner_rings(poly: etree._Element) -> List[List[Coord3]]:
 def copy_polygon_non_boundary_children(source_poly: etree._Element, dest_poly: etree._Element) -> None:
     for child in source_poly:
         lname = kml_local_name(child)
-
         if lname in {"outerBoundaryIs", "innerBoundaryIs"}:
             continue
-
         dest_poly.append(etree.fromstring(etree.tostring(child)))
 
 
@@ -822,7 +859,6 @@ def ring_side_for_uncrossed_hole(inner_ring: List[Coord3]) -> Optional[bool]:
 
     if all(x <= ANTIMERIDIAN_LON + GEOM_EPS for x in xs):
         return True
-
     if all(x >= ANTIMERIDIAN_LON - GEOM_EPS for x in xs):
         return False
 
@@ -831,7 +867,6 @@ def ring_side_for_uncrossed_hole(inner_ring: List[Coord3]) -> Optional[bool]:
 
 def split_polygon_antimeridian(poly: etree._Element) -> List[etree._Element]:
     outer = polygon_outer_ring(poly)
-
     if outer is None or not ring_crosses_antimeridian(outer):
         return [etree.fromstring(etree.tostring(poly))]
 
@@ -844,10 +879,10 @@ def split_polygon_antimeridian(poly: etree._Element) -> List[etree._Element]:
 
     if left360:
         pieces.append((True, convert_split_ring_to_kml_longitudes(left360, keep_left=True)))
-
     if right360:
         pieces.append((False, convert_split_ring_to_kml_longitudes(right360, keep_left=False)))
 
+    # If clipping failed or produced only one usable part, preserve the original geometry.
     if len(pieces) < 2:
         return [etree.fromstring(etree.tostring(poly))]
 
@@ -857,12 +892,12 @@ def split_polygon_antimeridian(poly: etree._Element) -> List[etree._Element]:
     for keep_left, outer_part in pieces:
         new_poly = polygon_from_outer_ring(outer_part, poly)
 
+        # Most storm swaths have no holes. If holes are present and do not cross
+        # the antimeridian, keep each hole with the side it fully belongs to.
         for inner in inner_rings:
             side = ring_side_for_uncrossed_hole(inner)
-
             if side is None or side != keep_left:
                 continue
-
             inner360 = ring_to_360_for_split(inner)
             inner_kml = convert_split_ring_to_kml_longitudes(inner360, keep_left=keep_left)
             add_inner_ring_to_polygon(new_poly, inner_kml)
@@ -872,13 +907,143 @@ def split_polygon_antimeridian(poly: etree._Element) -> List[etree._Element]:
     return out_polys
 
 
+
+def ring_open_vertices(ring: List[Coord3]) -> List[Coord3]:
+    if len(ring) > 1 and same_xy(ring[0], ring[-1]):
+        return list(ring[:-1])
+    return list(ring)
+
+
+def is_dateline_point(pt: Coord3) -> bool:
+    return abs(abs(pt[0]) - ANTIMERIDIAN_LON) <= 1.0e-7
+
+
+def ring_path_between(vertices: List[Coord3], start_idx: int, end_idx: int) -> List[Coord3]:
+    n = len(vertices)
+
+    if n == 0:
+        return []
+
+    path: List[Coord3] = []
+    i = start_idx % n
+
+    while True:
+        path.append(vertices[i])
+
+        if i == end_idx % n:
+            break
+
+        i = (i + 1) % n
+
+        if len(path) > n + 1:
+            return []
+
+    return path
+
+
+def non_boundary_score(path: List[Coord3]) -> int:
+    return sum(1 for pt in path if not is_dateline_point(pt))
+
+
+def dateline_non_boundary_path(ring: List[Coord3]) -> Optional[List[Coord3]]:
+    """
+    For one clipped antimeridian piece, return the edge path that is NOT the
+    artificial dateline edge. The returned path includes both dateline endpoints.
+    """
+    vertices = ring_open_vertices(close_ring(dedupe_consecutive(ring)))
+    boundary_indices = [i for i, pt in enumerate(vertices) if is_dateline_point(pt)]
+
+    if len(boundary_indices) != 2:
+        return None
+
+    i, j = boundary_indices
+    path_ij = ring_path_between(vertices, i, j)
+    path_ji = ring_path_between(vertices, j, i)
+
+    if non_boundary_score(path_ij) >= non_boundary_score(path_ji):
+        return path_ij
+
+    return path_ji
+
+
+def approx_same_dateline_lat(a: Coord3, b: Coord3, eps: float = 1.0e-6) -> bool:
+    return is_dateline_point(a) and is_dateline_point(b) and abs(a[1] - b[1]) <= eps
+
+
+def orient_path_to_start_end(path: List[Coord3], start_pt: Coord3, end_pt: Coord3) -> Optional[List[Coord3]]:
+    if not path:
+        return None
+
+    if approx_same_dateline_lat(path[0], start_pt) and approx_same_dateline_lat(path[-1], end_pt):
+        return path
+
+    rev = list(reversed(path))
+
+    if approx_same_dateline_lat(rev[0], start_pt) and approx_same_dateline_lat(rev[-1], end_pt):
+        return rev
+
+    return None
+
+
+def single_legend_polygon_from_dateline_parts(parts: List[etree._Element], source_poly: etree._Element) -> Optional[etree._Element]:
+    """
+    Compatibility fallback for map tools that explode KML MultiGeometry into
+    separate legend rows.
+
+    The standards-compliant KML multipolygon output is one Placemark containing
+    MultiGeometry. Some importers still show each child Polygon as a separate
+    legend item. This function keeps one KML Polygon by connecting the two split
+    pieces along the antimeridian seam only. Visually, the hazard remains cut at
+    +/-180, but the importer sees one Polygon geometry.
+    """
+    if len(parts) != 2:
+        return None
+
+    ring_a = polygon_outer_ring(parts[0])
+    ring_b = polygon_outer_ring(parts[1])
+
+    if not ring_a or not ring_b:
+        return None
+
+    path_a = dateline_non_boundary_path(ring_a)
+    path_b = dateline_non_boundary_path(ring_b)
+
+    if not path_a or not path_b:
+        return None
+
+    a_start, a_end = path_a[0], path_a[-1]
+    b_oriented = orient_path_to_start_end(path_b, a_end, a_start)
+
+    if b_oriented is None:
+        # Try the opposite orientation for the first path.
+        path_a = list(reversed(path_a))
+        a_start, a_end = path_a[0], path_a[-1]
+        b_oriented = orient_path_to_start_end(path_b, a_end, a_start)
+
+    if b_oriented is None:
+        return None
+
+    # Keep both +180 and -180 seam vertices so renderers have an explicit
+    # antimeridian edge instead of a world-spanning segment.
+    combined = list(path_a) + list(b_oriented)
+    combined = close_ring(dedupe_consecutive(combined))
+
+    if unique_xy_count(combined) < 3 or ring_area_abs(combined) <= GEOM_EPS:
+        return None
+
+    return polygon_from_outer_ring(combined, source_poly)
+
+
 def split_antimeridian_geometry(geom: etree._Element) -> etree._Element:
     """
     Split polygon geometry at the 180th meridian while preserving one KML item.
 
-    KML has no <MultiPolygon> element, so the correct KML representation is one
-    Placemark with one description/name/style and a <MultiGeometry> containing
-    two or more <Polygon> children.
+    Standard KML multipolygon equivalent:
+        one Placemark + one MultiGeometry + multiple Polygon children.
+
+    Compatibility mode:
+        one Placemark + one seamed Polygon, for importers that create one legend
+        row per Polygon child inside a MultiGeometry.
     """
     lname = kml_local_name(geom)
 
@@ -887,6 +1052,12 @@ def split_antimeridian_geometry(geom: etree._Element) -> etree._Element:
 
         if len(parts) == 1:
             return parts[0]
+
+        if ANTIMERIDIAN_SPLIT_MODE == "single_legend_polygon":
+            single_poly = single_legend_polygon_from_dateline_parts(parts, geom)
+
+            if single_poly is not None:
+                return single_poly
 
         mg = etree.Element(q(KML_NS_22, "MultiGeometry"))
 
@@ -903,13 +1074,16 @@ def split_antimeridian_geometry(geom: etree._Element) -> etree._Element:
             child_lname = kml_local_name(child)
 
             if child_lname == "Polygon":
-                parts = split_polygon_antimeridian(child)
+                split_child = split_antimeridian_geometry(child)
 
-                if len(parts) > 1:
+                if etree.tostring(split_child) != etree.tostring(child):
                     changed = True
 
-                for part in parts:
-                    mg.append(part)
+                if kml_local_name(split_child) == "MultiGeometry":
+                    for grandchild in split_child:
+                        mg.append(grandchild)
+                else:
+                    mg.append(split_child)
 
             elif child_lname == "MultiGeometry":
                 split_child = split_antimeridian_geometry(child)
@@ -925,6 +1099,17 @@ def split_antimeridian_geometry(geom: etree._Element) -> etree._Element:
 
             else:
                 mg.append(etree.fromstring(etree.tostring(child)))
+
+        if ANTIMERIDIAN_SPLIT_MODE == "single_legend_polygon":
+            mg_children = [child for child in mg if isinstance(child.tag, str)]
+            mg_polys = [child for child in mg_children if kml_local_name(child) == "Polygon"]
+            mg_other = [child for child in mg_children if kml_local_name(child) != "Polygon"]
+
+            if len(mg_polys) == 2 and not mg_other:
+                single_poly = single_legend_polygon_from_dateline_parts(mg_polys, mg_polys[0])
+
+                if single_poly is not None:
+                    return single_poly
 
         return mg if changed else etree.fromstring(etree.tostring(geom))
 
@@ -942,9 +1127,7 @@ def classify_wind_table(knots: int, agency: str) -> str:
             return "Tropical Storm"
         if 64 <= knots <= 129:
             return "Typhoon"
-
         return "Super Typhoon"
-
     if agency == "IMD":
         if knots < 33:
             return "Depression"
@@ -958,9 +1141,7 @@ def classify_wind_table(knots: int, agency: str) -> str:
             return "Very Severe Cyclonic Storm"
         if 96 <= knots <= 129:
             return "Extremely Severe Cyclonic Storm"
-
         return "Super Cyclonic Storm"
-
     if knots < 33:
         return "Tropical Disturbance"
     if knots == 33:
@@ -975,7 +1156,6 @@ def classify_wind_table(knots: int, agency: str) -> str:
         return "Category 3 Severe Tropical Cyclone"
     if 96 <= knots <= 112:
         return "Category 4 Severe Tropical Cyclone"
-
     return "Category 5 Severe Tropical Cyclone"
 
 
@@ -992,22 +1172,32 @@ def classify_wind_nhc(knots: int) -> str:
         return "Category 3 Hurricane"
     if 113 <= knots <= 136:
         return "Category 4 Hurricane"
-
     return "Category 5 Hurricane"
 
 
 # ======================================================================================
-# JTWC CONVERTER
+# JTWC CONVERTER (timezone carry-forward)
 # ======================================================================================
 def jtwc_is_forecast_folder(name: str) -> bool:
     return "forecast" in (name or "").strip().lower()
 
 
 def jtwc_extract_danger_swath_geometry(forecast_folder: etree._Element, ns: str) -> Optional[etree._Element]:
+    """Find the source impact polygon/swath geometry.
+
+    Raw JTWC products commonly call this "34 Knot Danger Swath". Cleaned KML
+    products created by this app call it "Impact Zone". Accepting both lets a
+    cleaned KML be reprocessed without losing the polygon.
+    """
     for pm in forecast_folder.findall(".//" + q(ns, "Placemark")):
         name = norm_name(txt(pm.find("./" + q(ns, "name"))))
+        is_impact_geom = (
+            name in {"34 knot danger swath", "impact zone", "forecast impact zone"}
+            or "danger swath" in name
+            or "impact zone" in name
+        )
 
-        if name == "34 knot danger swath":
+        if is_impact_geom:
             mg = pm.find(".//" + q(ns, "MultiGeometry"))
 
             if mg is not None:
@@ -1026,11 +1216,12 @@ def jtwc_extract_danger_swath_geometry(forecast_folder: etree._Element, ns: str)
 def jtwc_pick_agency_option2(lon: float, lat: float) -> str:
     """
     Region rules used by the JTWC-style KMZ converter:
-      - NHC/CPHC: northern-hemisphere western longitudes, including Atlantic,
-        Gulf of Mexico, Caribbean, eastern Pacific, and central Pacific.
-      - IMD: Indian Ocean-ish, lat -40..30, lon 30E..110E.
-      - BOM/FMS: Australia + South Pacific + NZ approaches, southern hemisphere.
-      - JTWC: otherwise.
+      - NHC/CPHC: northern-hemisphere western longitudes, including the
+        Atlantic, Gulf of Mexico, Caribbean, eastern Pacific, and central Pacific
+      - IMD: Indian Ocean-ish, lat -40..30, lon 30E..110E
+      - BOM/FMS: AUS + South Pacific + NZ approaches, southern hemisphere,
+        lon 90E..240E, lat -60..0
+      - JTWC: otherwise
     """
     lon360 = lon % 360.0
     lon_norm = normalize_lon_180(lon)
@@ -1038,12 +1229,18 @@ def jtwc_pick_agency_option2(lon: float, lat: float) -> str:
     def in_box(lon360_, lat_, lon_min, lon_max, lat_min, lat_max):
         return lon_min <= lon360_ <= lon_max and lat_min <= lat_ <= lat_max
 
+    # NHC / CPHC basins. Treat this as basin detection, not source detection.
+    # It covers the Atlantic through Cabo Verde / West Africa, the Gulf,
+    # Caribbean, eastern Pacific, and central Pacific. This prevents worldwide
+    # JTWC-format files in these basins from falling through to WPAC defaults.
     if 0.0 <= lat <= 50.0 and -180.0 <= lon_norm <= 20.0:
         return "NHC"
 
+    # IMD first where eastern-basin boxes overlap.
     if in_box(lon360, lat, 30.0, 110.0, -40.0, 30.0):
         return "IMD"
 
+    # BOM/FMS: include Coral Sea + SW Pacific out toward/around NZ.
     if in_box(lon360, lat, 90.0, 240.0, -60.0, 0.0):
         return "BOM"
 
@@ -1051,105 +1248,91 @@ def jtwc_pick_agency_option2(lon: float, lat: float) -> str:
 
 
 DTG_RE = re.compile(r"\b(\d{2})(\d{2})(\d{2})Z\s+([A-Z]{3})\s+(\d{4})\b", re.IGNORECASE)
-MONTHS = {
-    "JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
-    "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12,
-}
+MONTHS = {"JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6, "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12}
 ANCHOR_YYMMDDHH_RE = re.compile(r"\b(\d{8})Z\b")
 FULL_YYYYMMDDHH_RE = re.compile(r"\b(20\d{2})(\d{2})(\d{2})(\d{2})Z\b")
-FORECAST_NAME_RE_JTWC = re.compile(
-    r"(?P<day>\d{1,2})\s*/\s*(?P<hour>\d{2})Z.*?(?P<knots>\d{1,3})\s*knots?",
-    re.IGNORECASE,
-)
+FORECAST_NAME_RE_JTWC = re.compile(r"(?P<day>\d{1,2})\s*/\s*(?P<hour>\d{2})Z.*?(?P<knots>\d{1,3})\s*knots?", re.IGNORECASE)
 
 WARNING_RE_JTWC = re.compile(
-    r"\b(?:SUPER\s+TYPHOON|TYPHOON|TROPICAL\s+(?:CYCLONE|STORM|DEPRESSION))\s+(\d{1,2}[A-Z])\s+\(([^)]+)\).*?\bWARNING\b",
-    re.IGNORECASE,
+    r"\b(?:SUPER\s+TYPHOON|TYPHOON|HURRICANE|TROPICAL\s+(?:CYCLONE|STORM|DEPRESSION))\s+(\d{1,2}[A-Z])\s+\(([^)]+)\).*?\bWARNING\b",
+    re.IGNORECASE
+)
+
+LOOSE_STORM_ID_NAME_RE_JTWC = re.compile(
+    r"\b(?:SUPER\s+TYPHOON|TYPHOON|HURRICANE|TROPICAL\s+(?:CYCLONE|STORM|DEPRESSION))\s+(\d{1,2}[A-Z])\s+\(([^)]+)\)",
+    re.IGNORECASE
 )
 
 
 def parse_dtg_anywhere(names: List[str]) -> Optional[datetime]:
     for s in names:
         m = DTG_RE.search(s or "")
-
         if not m:
             continue
-
         dd = int(m.group(1))
         hh = int(m.group(2))
         mm = int(m.group(3))
         mon = MONTHS.get(m.group(4).upper(), None)
         yyyy = int(m.group(5))
-
         if mon is None:
             continue
-
         try:
             return datetime(yyyy, mon, dd, hh, mm, tzinfo=timezone.utc)
         except ValueError:
             continue
-
     return None
 
 
 def parse_anchor_yyMMddhh(names: List[str]) -> Optional[datetime]:
     candidates: List[datetime] = []
-
     for s in names:
         m = ANCHOR_YYMMDDHH_RE.search(s or "")
-
         if not m:
             continue
-
         raw = m.group(1)
         yy = int(raw[0:2])
         mon = int(raw[2:4])
         dd = int(raw[4:6])
         hh = int(raw[6:8])
         yyyy = 2000 + yy
-
         try:
             candidates.append(datetime(yyyy, mon, dd, hh, 0, tzinfo=timezone.utc))
         except ValueError:
             continue
 
+    # JTWC previous best-track placemarks can span weeks. Use the latest old
+    # best-track timestamp as the fallback month/year anchor, not the oldest.
     return max(candidates) if candidates else None
 
 
 def parse_full_yyyymmddhh_one(s: str) -> Optional[datetime]:
     for m in FULL_YYYYMMDDHH_RE.finditer(s or ""):
         yyyy, mon, dd, hh = map(int, m.groups())
-
         try:
             return datetime(yyyy, mon, dd, hh, 0, tzinfo=timezone.utc)
         except ValueError:
             continue
-
     return None
 
 
 def parse_full_yyyymmddhh_anywhere(strings: List[str]) -> Optional[datetime]:
     for s in strings:
         dt = parse_full_yyyymmddhh_one(s)
-
         if dt is not None:
             return dt
-
     return None
 
 
 def parse_forecast_day_hour_knots_jtwc(name: str) -> Optional[Tuple[int, int, int]]:
     m = FORECAST_NAME_RE_JTWC.search(name or "")
-
     if not m:
         return None
-
     return int(m.group("day")), int(m.group("hour")), int(m.group("knots"))
 
 
 def infer_forecast_datetimes_jtwc(
     forecast_points_in_order: List[Tuple[str, float, float, int, int, int]],
-    reference_utc: Optional[datetime],
+    reference_utc: Optional[datetime]
 ) -> List[datetime]:
     if reference_utc is None:
         reference_utc = datetime.now(timezone.utc)
@@ -1176,16 +1359,13 @@ def infer_forecast_datetimes_jtwc(
 
         if prev is not None and cand < prev:
             y, mth = cand.year, cand.month
-
             for _ in range(14):
                 dt_tmp = datetime(y, mth, 1, tzinfo=timezone.utc) + relativedelta(months=+1)
                 y, mth = dt_tmp.year, dt_tmp.month
-
                 try:
                     cand2 = datetime(y, mth, day, hour, 0, tzinfo=timezone.utc)
                 except ValueError:
                     continue
-
                 if cand2 >= prev:
                     cand = cand2
                     break
@@ -1200,6 +1380,17 @@ def infer_forecast_datetimes_jtwc(
 def parse_jtwc_storm_id_name(names: List[str]) -> Tuple[Optional[str], Optional[str]]:
     for s in names:
         m = WARNING_RE_JTWC.search(s or "")
+
+        if m:
+            return m.group(1).upper().strip(), m.group(2).upper().strip()
+
+    # Some CPHC/JTWC-style products put the warning text inside the first
+    # forecast-point name, for example:
+    #   16/00Z (HURRICANE 01C (LALA) WARNING NR 15 - 65 knots)
+    # Keep a second, looser pass so the output filename does not collapse to
+    # only "1600Z Cleaned Forecast".
+    for s in names:
+        m = LOOSE_STORM_ID_NAME_RE_JTWC.search(s or "")
 
         if m:
             return m.group(1).upper().strip(), m.group(2).upper().strip()
@@ -1225,10 +1416,8 @@ def build_clean_kml_simple(doc_title: str, points: List[OutPoint], impact_geom: 
 
     pm_track = etree.SubElement(folder, q(KML_NS_22, "Placemark"))
     etree.SubElement(pm_track, q(KML_NS_22, "name")).text = "Storm Track"
-
     d = etree.SubElement(pm_track, q(KML_NS_22, "description"))
     d.text = etree.CDATA(TRACK_DESCRIPTION)
-
     ls = etree.SubElement(pm_track, q(KML_NS_22, "LineString"))
     etree.SubElement(ls, q(KML_NS_22, "tessellate")).text = "1"
     etree.SubElement(ls, q(KML_NS_22, "coordinates")).text = " ".join(f"{p.lon},{p.lat},0" for p in points)
@@ -1236,20 +1425,16 @@ def build_clean_kml_simple(doc_title: str, points: List[OutPoint], impact_geom: 
     for p in points:
         pm = etree.SubElement(folder, q(KML_NS_22, "Placemark"))
         etree.SubElement(pm, q(KML_NS_22, "name")).text = p.name
-
         desc = etree.SubElement(pm, q(KML_NS_22, "description"))
         desc.text = etree.CDATA(p.description)
-
         pt = etree.SubElement(pm, q(KML_NS_22, "Point"))
         etree.SubElement(pt, q(KML_NS_22, "coordinates")).text = f"{p.lon},{p.lat},0"
 
     if impact_geom is not None:
         pm_sw = etree.SubElement(folder, q(KML_NS_22, "Placemark"))
         etree.SubElement(pm_sw, q(KML_NS_22, "name")).text = "Impact Zone"
-
         desc = etree.SubElement(pm_sw, q(KML_NS_22, "description"))
         desc.text = etree.CDATA(IMPACT_DESCRIPTION)
-
         pm_sw.append(split_antimeridian_geometry(impact_geom))
 
     return etree.tostring(kml, xml_declaration=True, encoding="UTF-8", pretty_print=False)
@@ -1261,7 +1446,6 @@ def convert_jtwc_kmz(raw_kmz: bytes) -> Tuple[bytes, str]:
     ns = root.nsmap.get(None, KML_NS_22)
 
     doc = root.find(".//" + q(ns, "Document"))
-
     if doc is None:
         raise ValueError("JTWC: No <Document> found.")
 
@@ -1277,14 +1461,11 @@ def convert_jtwc_kmz(raw_kmz: bytes) -> Tuple[bytes, str]:
     )
 
     forecast = None
-
     for f in doc.findall(".//" + q(ns, "Folder")):
         nm = txt(f.find("./" + q(ns, "name")))
-
         if jtwc_is_forecast_folder(nm):
             forecast = f
             break
-
     if forecast is None:
         forecast = doc
 
@@ -1295,20 +1476,15 @@ def convert_jtwc_kmz(raw_kmz: bytes) -> Tuple[bytes, str]:
         name = txt(pm.find("./" + q(ns, "name")))
         desc = txt(pm.find("./" + q(ns, "description")))
         coord = pm.findtext(".//" + q(ns, "Point") + "/" + q(ns, "coordinates")) or ""
-
         if not coord:
             continue
-
         parsed = parse_forecast_day_hour_knots_jtwc(name)
-
         if not parsed:
             continue
-
         lon, lat, *_ = coord.split(",")
         day, hour, knots = parsed
         exact_utc = parse_full_yyyymmddhh_one(desc) or parse_full_yyyymmddhh_one(name)
         row = (name, float(lon), float(lat), day, hour, knots)
-
         raw_forecast_points.append((*row, exact_utc))
         points_for_inference.append(row)
 
@@ -1316,20 +1492,19 @@ def convert_jtwc_kmz(raw_kmz: bytes) -> Tuple[bytes, str]:
         raise ValueError("JTWC: No forecast points found (expected 'DD/HHZ - N knots').")
 
     inferred_utcs = infer_forecast_datetimes_jtwc(points_for_inference, reference_utc)
-    resolved_utcs = [
-        exact_utc or inferred
-        for (*_row, exact_utc), inferred in zip(raw_forecast_points, inferred_utcs)
-    ]
+    resolved_utcs = [exact_utc or inferred for (*_row, exact_utc), inferred in zip(raw_forecast_points, inferred_utcs)]
 
     last_tzinfo: Optional[ZoneInfo] = None
     last_abbr: Optional[str] = None
 
     out_points: List[OutPoint] = []
-
     for (name, lon, lat, _d, _h, knots, _exact_utc), utc_dt in zip(raw_forecast_points, resolved_utcs):
         agency = jtwc_pick_agency_option2(lon, lat)
         category = classify_wind_nhc(knots) if agency == "NHC" else classify_wind_table(knots, agency)
 
+        # For WPAC JTWC files, apply deterministic proximity rules first for
+        # offshore Taiwan / East China Sea transition points. Offset-only scoring
+        # cannot distinguish Manila, Taipei, and Shanghai because all are UTC+8.
         preferred_wpac_zone = west_pacific_fallback_zone(lon, lat) if agency == "JTWC" else None
         found = (
             tzinfo_and_abbr_from_tzname(preferred_wpac_zone, utc_dt)
@@ -1349,27 +1524,24 @@ def convert_jtwc_kmz(raw_kmz: bytes) -> Tuple[bytes, str]:
 
         desc = (
             f"{category}: The forecast center of circulation with a maximum sustained wind speed of "
-            f"{knots} knots / {kph} kph / {mph} mph as of "
-            f"{local_dt.strftime('%H:%M')} {abbr} {format_month_day(local_dt)}."
+            f"{knots} knots / {kph} kph / {mph} mph as of {local_dt.strftime('%H:%M')} {abbr} {format_month_day(local_dt)}."
         )
-
         out_points.append(OutPoint(name=name, lon=lon, lat=lat, description=desc))
 
     impact_geom = jtwc_extract_danger_swath_geometry(forecast, ns)
 
     first_label = raw_forecast_points[0][0]
     m = FORECAST_NAME_RE_JTWC.search(first_label)
-    d_h = f"{int(m.group('day')):02d}/{int(m.group('hour')):02d}Z" if m else ""
-
+    d_h = f"{int(m.group('day')):02d}{int(m.group('hour')):02d}Z" if m else ""
     parts = [p for p in [storm_id, storm_name, d_h, "Cleaned Forecast"] if p]
     file_stem = " ".join(parts).strip() or "output"
 
-    out_kml = build_clean_kml_simple("Cleaned Forecast", out_points, impact_geom)
+    out_kml = build_clean_kml_simple(file_stem, out_points, impact_geom)
     return out_kml, file_stem
 
 
 # ======================================================================================
-# NHC CONVERTER
+# NHC CONVERTER (TOA optional)
 # ======================================================================================
 NHC_TZ_ABBREV_TO_IANA: Dict[str, str] = {
     "EDT": "America/New_York",
@@ -1388,13 +1560,10 @@ NHC_TZ_ABBREV_TO_IANA: Dict[str, str] = {
 }
 
 VALID_AT_LINE_RE = re.compile(r"Valid at:\s*([^<]+)", re.IGNORECASE)
-
 VALID_AT_TZ_RE = re.compile(
-    r"(?P<time>\d{1,2}:\d{2}\s*[AP]M)\s+(?P<tz>[A-Z]{2,4})\s+"
-    r"(?P<date>[A-Za-z]+\s+\d{1,2},\s*\d{4})",
-    re.IGNORECASE,
+    r"(?P<time>\d{1,2}:\d{2}\s*[AP]M)\s+(?P<tz>[A-Z]{2,4})\s+(?P<date>[A-Za-z]+\s+\d{1,2},\s*\d{4})",
+    re.IGNORECASE
 )
-
 MAX_WIND_RE = re.compile(r"Maximum Wind:\s*([0-9]{1,3})\s*knots", re.IGNORECASE)
 
 
@@ -1404,21 +1573,17 @@ def parse_nhc_track_desc(desc_html: str) -> Tuple[Optional[datetime], Optional[i
 
     storm_desc = None
     m0 = re.search(r"<h2>\s*([^<]+)\s*</h2>", desc_html, re.IGNORECASE)
-
     if m0:
         storm_desc = re.sub(r"\s+", " ", m0.group(1).strip())
 
     dt_local = None
     tz_abbrev = None
     mline = VALID_AT_LINE_RE.search(desc_html)
-
     if mline:
         raw_line = re.sub(r"\s+", " ", mline.group(1).strip())
         mtz = VALID_AT_TZ_RE.search(raw_line)
-
         if mtz:
             tz_abbrev = mtz.group("tz").upper()
-
             try:
                 dt_local = dtparser.parse(f"{mtz.group('time')} {mtz.group('date')}", fuzzy=True).replace(tzinfo=None)
             except Exception:
@@ -1437,48 +1602,38 @@ def parse_nhc_track_desc(desc_html: str) -> Tuple[Optional[datetime], Optional[i
 
 def parse_coords_list(coord_text: str) -> List[Tuple[float, float]]:
     coords: List[Tuple[float, float]] = []
-
     for tok in (coord_text or "").split():
         parts = tok.split(",")
-
         if len(parts) >= 2:
             coords.append((float(parts[0]), float(parts[1])))
-
     return coords
 
 
 def extract_best_linestring(doc: etree._Element, ns: str) -> Optional[List[Tuple[float, float]]]:
     best = None
     best_n = -1
-
     for pm in doc.findall(".//" + q(ns, "Placemark")):
         coords = pm.findtext(".//" + q(ns, "LineString") + "/" + q(ns, "coordinates")) or ""
         pts = parse_coords_list(coords)
-
         if len(pts) > best_n:
             best_n = len(pts)
             best = pts
-
     return best if best_n > 0 else None
 
 
 def linestring_to_polygon_geom(line_coords: List[Tuple[float, float]]) -> etree._Element:
     if len(line_coords) < 4:
         raise ValueError("TOA 34 contour is too short to form a polygon.")
-
     ring = list(line_coords)
-
     if ring[0] != ring[-1]:
         ring.append(ring[0])
 
     poly = etree.Element(q(KML_NS_22, "Polygon"))
     etree.SubElement(poly, q(KML_NS_22, "tessellate")).text = "1"
-
     ob = etree.SubElement(poly, q(KML_NS_22, "outerBoundaryIs"))
     lr = etree.SubElement(ob, q(KML_NS_22, "LinearRing"))
     ce = etree.SubElement(lr, q(KML_NS_22, "coordinates"))
     ce.text = " ".join(f"{lon},{lat},0" for lon, lat in ring)
-
     return poly
 
 
@@ -1488,29 +1643,29 @@ def build_nhc_kml(
     toa_folder_name: Optional[str],
     ww_folder_name: Optional[str],
     ww_lines: List[Tuple[str, str, List[Tuple[float, float]]]],
+    doc_title: str = "Cleaned Forecast",
 ) -> bytes:
     kml = etree.Element(q(KML_NS_22, "kml"), nsmap=NSMAP_22)
     doc = etree.SubElement(kml, q(KML_NS_22, "Document"))
-    etree.SubElement(doc, q(KML_NS_22, "name")).text = "Untitled map"
+    etree.SubElement(doc, q(KML_NS_22, "name")).text = doc_title
 
+    # Optional TOA folder
     if toa_polygon is not None and toa_folder_name:
         f_toa = etree.SubElement(doc, q(KML_NS_22, "Folder"))
         etree.SubElement(f_toa, q(KML_NS_22, "name")).text = toa_folder_name
 
         pm_toa = etree.SubElement(f_toa, q(KML_NS_22, "Placemark"))
         etree.SubElement(pm_toa, q(KML_NS_22, "name")).text = ""
-
         d_toa = etree.SubElement(pm_toa, q(KML_NS_22, "description"))
         d_toa.text = etree.CDATA(IMPACT_DESCRIPTION)
-
         pm_toa.append(split_antimeridian_geometry(toa_polygon))
 
+    # Forecast Track folder
     f_track = etree.SubElement(doc, q(KML_NS_22, "Folder"))
     etree.SubElement(f_track, q(KML_NS_22, "name")).text = "Forecast Track"
 
     pm_line = etree.SubElement(f_track, q(KML_NS_22, "Placemark"))
     etree.SubElement(pm_line, q(KML_NS_22, "name")).text = ""
-
     d_line = etree.SubElement(pm_line, q(KML_NS_22, "description"))
     d_line.text = etree.CDATA(TRACK_DESCRIPTION)
 
@@ -1526,16 +1681,13 @@ def build_nhc_kml(
 
         desc_text = (
             f"{category}: The forecast center of circulation with a wind speed of "
-            f"{knots} knots / {kph} kph / {mph} mph at "
-            f"{dt_local_naive.strftime('%H:%M')} {tz_abbrev} {format_month_day_dot(dt_local_naive)}."
+            f"{knots} knots / {kph} kph / {mph} mph at {dt_local_naive.strftime('%H:%M')} {tz_abbrev} {format_month_day_dot(dt_local_naive)}."
         )
 
         pm = etree.SubElement(f_track, q(KML_NS_22, "Placemark"))
         etree.SubElement(pm, q(KML_NS_22, "name")).text = ""
-
         d = etree.SubElement(pm, q(KML_NS_22, "description"))
         d.text = etree.CDATA(desc_text)
-
         pt = etree.SubElement(pm, q(KML_NS_22, "Point"))
         etree.SubElement(pt, q(KML_NS_22, "coordinates")).text = f"{lon},{lat},0"
 
@@ -1546,10 +1698,8 @@ def build_nhc_kml(
         for warn_name, warn_desc, coords in ww_lines:
             pmw = etree.SubElement(f_ww, q(KML_NS_22, "Placemark"))
             etree.SubElement(pmw, q(KML_NS_22, "name")).text = warn_name
-
             dw = etree.SubElement(pmw, q(KML_NS_22, "description"))
             dw.text = etree.CDATA(warn_desc)
-
             lsw = etree.SubElement(pmw, q(KML_NS_22, "LineString"))
             etree.SubElement(lsw, q(KML_NS_22, "tessellate")).text = "1"
             etree.SubElement(lsw, q(KML_NS_22, "coordinates")).text = "\n".join(
@@ -1563,14 +1713,12 @@ def convert_nhc(track_kmz: bytes, toa34_kmz: Optional[bytes], ww_kmz: Optional[b
     track_root, track_ns = load_kmz_root(track_kmz)
     track_doc = get_doc(track_root, track_ns, "NHC TRACK")
 
+    # Parse TRACK points
     raw_pts: List[Tuple[float, float, str]] = []
-
     for pm in track_doc.findall(".//" + q(track_ns, "Placemark")):
         coord = pm.findtext(".//" + q(track_ns, "Point") + "/" + q(track_ns, "coordinates"))
-
         if not coord:
             continue
-
         lon, lat, *_ = coord.split(",")
         desc = pm.findtext(q(track_ns, "description")) or ""
         raw_pts.append((float(lon), float(lat), desc))
@@ -1583,56 +1731,49 @@ def convert_nhc(track_kmz: bytes, toa34_kmz: Optional[bytes], ww_kmz: Optional[b
 
     for lon, lat, desc_html in raw_pts:
         dt_local_naive, knots, storm_desc, tz_abbrev = parse_nhc_track_desc(desc_html)
-
         if dt_local_naive is None or knots is None:
             continue
-
         tz_abbrev = (tz_abbrev or "UTC").upper()
         track_points.append((lon, lat, dt_local_naive, knots, tz_abbrev))
-
         if not first_storm_desc and storm_desc:
             first_storm_desc = storm_desc
 
     if not track_points:
         raise ValueError("NHC: Could not parse any point times/winds from TRACK descriptions.")
 
+    # Optional TOA
     toa_polygon = None
     toa_folder_name = None
-
     if toa34_kmz:
         toa_root, toa_ns = load_kmz_root(toa34_kmz)
         toa_doc = get_doc(toa_root, toa_ns, "NHC TOA 34")
         toa_folder_name = toa_doc.findtext(q(toa_ns, "name")) or "Earliest-Reasonable Time of Arrival"
         best_ls = extract_best_linestring(toa_doc, toa_ns)
-
         if best_ls:
             toa_polygon = linestring_to_polygon_geom(best_ls)
 
+    # Storm ID + name for filename
     storm_id = None
     storm_name = None
-
     if first_storm_desc:
         m = re.search(r"\(([A-Z]{2}\d{6})\)", first_storm_desc)
-
         if m:
             storm_id = m.group(1)
-
         m2 = re.search(
             r"\b(?:Tropical Storm|Hurricane|Tropical Depression|Potential Tropical Cyclone)\s+([A-Za-z0-9_-]+)\s*\(",
             first_storm_desc,
-            re.IGNORECASE,
+            re.IGNORECASE
         )
-
         if m2:
             storm_name = m2.group(1).upper()
 
     if not storm_id:
         doc_title = track_doc.findtext(q(track_ns, "name")) or ""
         m = re.search(r"\b([A-Z]{2}\d{6})\b", doc_title)
-
         if m:
             storm_id = m.group(1)
 
+    # Filename time from first point using tz abbrev mapping (best effort)
     first_local_naive = track_points[0][2]
     tz_abbrev = (track_points[0][4] or "UTC").upper()
     utc_dt_for_name = None
@@ -1651,9 +1792,9 @@ def convert_nhc(track_kmz: bytes, toa34_kmz: Optional[bytes], ww_kmz: Optional[b
     parts = [p for p in [storm_id, storm_name, d_h, "Cleaned Forecast"] if p]
     file_stem = " ".join(parts).strip() or "output"
 
+    # WW optional (kept as-is for now)
     ww_folder_name = None
     ww_lines: List[Tuple[str, str, List[Tuple[float, float]]]] = []
-
     if ww_kmz:
         ww_root, ww_ns = load_kmz_root(ww_kmz)
         ww_doc = get_doc(ww_root, ww_ns, "NHC WW")
@@ -1666,15 +1807,9 @@ def convert_nhc(track_kmz: bytes, toa34_kmz: Optional[bytes], ww_kmz: Optional[b
             warn_name = (pm.findtext(q(ww_ns, "name")) or "").strip()
             coords = pm.findtext(".//" + q(ww_ns, "LineString") + "/" + q(ww_ns, "coordinates")) or ""
             pts = parse_coords_list(coords)
-
             if not pts or not warn_name:
                 continue
-
-            warn_desc = (
-                f"{warn_name}: Advisory in place as of "
-                f"{adv_local_naive.strftime('%H:%M')} {adv_tz_abbrev} {format_month_day_dot(adv_local_naive)}."
-            )
-
+            warn_desc = f"{warn_name}: Advisory in place as of {adv_local_naive.strftime('%H:%M')} {adv_tz_abbrev} {format_month_day_dot(adv_local_naive)}."
             ww_lines.append((warn_name, warn_desc, pts))
 
     out_kml = build_nhc_kml(
@@ -1683,13 +1818,13 @@ def convert_nhc(track_kmz: bytes, toa34_kmz: Optional[bytes], ww_kmz: Optional[b
         toa_folder_name=toa_folder_name,
         ww_folder_name=ww_folder_name,
         ww_lines=ww_lines,
+        doc_title=file_stem,
     )
-
     return out_kml, file_stem
 
 
 # ======================================================================================
-# Streamlit UI
+# Streamlit UI (left-aligned, full-width)
 # ======================================================================================
 def reset_output_state():
     st.session_state.out_kml = None
@@ -1702,6 +1837,7 @@ st.set_page_config(page_title=APP_NAME, layout="centered")
 st.markdown(f"## {APP_NAME}")
 st.caption(APP_DESC)
 
+# Download button green
 st.markdown(
     """
     <style>
@@ -1720,18 +1856,15 @@ st.markdown(
     }
     </style>
     """,
-    unsafe_allow_html=True,
+    unsafe_allow_html=True
 )
 
 if "out_kml" not in st.session_state:
     st.session_state.out_kml = None
-
 if "out_name" not in st.session_state:
     st.session_state.out_name = None
-
 if "last_upload_sig" not in st.session_state:
     st.session_state.last_upload_sig = None
-
 if "uploader_key" not in st.session_state:
     st.session_state.uploader_key = 0
 
@@ -1739,15 +1872,10 @@ source = st.radio("Source", ["JTWC", "NHC"], horizontal=True)
 st.divider()
 
 if source == "JTWC":
-    raw = st.file_uploader(
-        "Upload raw JTWC KMZ",
-        type=["kmz"],
-        key=f"uploader_{st.session_state.uploader_key}_jtwc",
-    )
+    raw = st.file_uploader("Upload raw JTWC KML/KMZ", type=["kmz", "kml"], key=f"uploader_{st.session_state.uploader_key}_jtwc")
 
     if raw is not None:
         upload_sig = ("JTWC", raw.name, raw.size)
-
         if st.session_state.last_upload_sig != upload_sig:
             st.session_state.last_upload_sig = upload_sig
             st.session_state.out_kml = None
@@ -1758,7 +1886,6 @@ if source == "JTWC":
     else:
         if st.session_state.out_kml is None:
             st.write(f"Selected file: **{raw.name}**")
-
             if st.button("Convert", type="primary", use_container_width=True):
                 with st.spinner("Converting…"):
                     try:
@@ -1771,7 +1898,6 @@ if source == "JTWC":
                         st.error(f"Conversion failed: {e}")
         else:
             st.write(f"Output file: **{st.session_state.out_name}**")
-
             st.download_button(
                 "Download KML",
                 data=st.session_state.out_kml,
@@ -1779,41 +1905,20 @@ if source == "JTWC":
                 mime="application/vnd.google-earth.kml+xml",
                 use_container_width=True,
             )
-
             if st.button("Convert another file", use_container_width=True):
                 reset_output_state()
                 st.rerun()
 
 else:
-    track = st.file_uploader(
-        "Upload TRACK.kmz (required)",
-        type=["kmz"],
-        key=f"uploader_{st.session_state.uploader_key}_nhc_track",
-    )
 
-    toa = st.file_uploader(
-        "Upload Earliest Reasonable TOA 34.kmz",
-        type=["kmz"],
-        key=f"uploader_{st.session_state.uploader_key}_nhc_toa",
-    )
-
-    ww = st.file_uploader(
-        "Upload WW.kmz",
-        type=["kmz"],
-        key=f"uploader_{st.session_state.uploader_key}_nhc_ww",
-    )
+    track = st.file_uploader("Upload TRACK KML/KMZ (required)", type=["kmz", "kml"], key=f"uploader_{st.session_state.uploader_key}_nhc_track")
+    toa = st.file_uploader("Upload Earliest Reasonable TOA 34 KML/KMZ", type=["kmz", "kml"], key=f"uploader_{st.session_state.uploader_key}_nhc_toa")
+    ww = st.file_uploader("Upload WW KML/KMZ", type=["kmz", "kml"], key=f"uploader_{st.session_state.uploader_key}_nhc_ww")
 
     sig_parts = ["NHC"]
-
-    if track:
-        sig_parts += [track.name, track.size]
-
-    if toa:
-        sig_parts += [toa.name, toa.size]
-
-    if ww:
-        sig_parts += [ww.name, ww.size]
-
+    if track: sig_parts += [track.name, track.size]
+    if toa: sig_parts += [toa.name, toa.size]
+    if ww: sig_parts += [ww.name, ww.size]
     upload_sig = tuple(sig_parts) if len(sig_parts) > 1 else None
 
     if upload_sig and st.session_state.last_upload_sig != upload_sig:
@@ -1841,7 +1946,6 @@ else:
                         st.error(f"Conversion failed: {e}")
         else:
             st.write(f"Output file: **{st.session_state.out_name}**")
-
             st.download_button(
                 "Download KML",
                 data=st.session_state.out_kml,
@@ -1849,7 +1953,6 @@ else:
                 mime="application/vnd.google-earth.kml+xml",
                 use_container_width=True,
             )
-
             if st.button("Convert another file", use_container_width=True):
                 reset_output_state()
                 st.rerun()
