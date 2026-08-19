@@ -1,4 +1,6 @@
+from __future__ import annotations
 import io
+import json
 import re
 import zipfile
 from dataclasses import dataclass
@@ -17,7 +19,7 @@ from timezonefinder import TimezoneFinder
 # App branding
 # =========================
 APP_NAME = "StormTrack Mapper"
-APP_DESC = "Convert JTWC or NHC storm KMZ files into clean, analyst-ready KML for alert mapping."
+APP_DESC = "Convert JTWC or NHC storm KML/KMZ files into clean, dateline-safe GeoJSON for alert mapping."
 
 TRACK_DESCRIPTION = "Forecast Track: The forecast track of the system's center of circulation."
 IMPACT_DESCRIPTION = "Forecast Impact Zone: The area in which impacts from the tropical system are likely to be felt."
@@ -43,6 +45,11 @@ MONTH_DOT = {
     1: "Jan.", 2: "Feb.", 3: "Mar.", 4: "Apr.", 5: "May.", 6: "Jun.",
     7: "Jul.", 8: "Aug.", 9: "Sep.", 10: "Oct.", 11: "Nov.", 12: "Dec."
 }
+
+DEFAULT_OUTPUT_FORMAT = "geojson"
+DEFAULT_OUTPUT_EXT = "geojson"
+DEFAULT_OUTPUT_MIME = "application/geo+json"
+DEFAULT_OUTPUT_LABEL = "GeoJSON"
 
 
 # =========================
@@ -1116,6 +1123,210 @@ def split_antimeridian_geometry(geom: etree._Element) -> etree._Element:
     return etree.fromstring(etree.tostring(geom))
 
 
+# =========================
+# GeoJSON output helpers
+# =========================
+def geojson_safe_lon(lon: float) -> float:
+    """
+    GeoJSON should use longitudes in the -180..180 range. Preserve explicit
+    +180/-180 antimeridian seam vertices produced by the split logic.
+    """
+    if abs(lon - 180.0) <= 1.0e-7:
+        return 180.0
+
+    if abs(lon + 180.0) <= 1.0e-7:
+        return -180.0
+
+    return normalize_lon_180(lon)
+
+
+def coord3_to_geojson_xy(pt: Coord3) -> List[float]:
+    lon, lat, _alt = pt
+    return [round(geojson_safe_lon(lon), 8), round(lat, 8)]
+
+
+def ring_to_geojson_coords(ring: List[Coord3]) -> List[List[float]]:
+    closed = close_ring(dedupe_consecutive(ring))
+    return [coord3_to_geojson_xy(pt) for pt in closed]
+
+
+def polygon_to_geojson_coordinates(poly: etree._Element) -> Optional[List[List[List[float]]]]:
+    outer = polygon_outer_ring(poly)
+
+    if not outer:
+        return None
+
+    rings: List[List[List[float]]] = [ring_to_geojson_coords(outer)]
+
+    for inner in polygon_inner_rings(poly):
+        if len(inner) >= 4 and unique_xy_count(inner) >= 3 and ring_area_abs(inner) > GEOM_EPS:
+            rings.append(ring_to_geojson_coords(inner))
+
+    return rings
+
+
+def split_geometry_to_polygon_parts(geom: etree._Element) -> List[etree._Element]:
+    """
+    Return dateline-safe polygon parts for GeoJSON. One source Placemark should
+    still become one GeoJSON Feature; multiple polygon parts are represented as
+    one MultiPolygon geometry.
+    """
+    lname = kml_local_name(geom)
+
+    if lname == "Polygon":
+        return split_polygon_antimeridian(geom)
+
+    if lname == "MultiGeometry":
+        parts: List[etree._Element] = []
+
+        for child in geom:
+            child_lname = kml_local_name(child)
+
+            if child_lname in {"Polygon", "MultiGeometry"}:
+                parts.extend(split_geometry_to_polygon_parts(child))
+
+        return parts
+
+    return []
+
+
+def geometry_to_geojson_dateline_safe(geom: etree._Element) -> Optional[Dict]:
+    polygon_parts = split_geometry_to_polygon_parts(geom)
+    polygon_coords: List[List[List[List[float]]]] = []
+
+    for poly in polygon_parts:
+        coords = polygon_to_geojson_coordinates(poly)
+
+        if coords:
+            polygon_coords.append(coords)
+
+    if not polygon_coords:
+        return None
+
+    if len(polygon_coords) == 1:
+        return {"type": "Polygon", "coordinates": polygon_coords[0]}
+
+    return {"type": "MultiPolygon", "coordinates": polygon_coords}
+
+
+def feature_properties(name: str, description: str, feature_type: str) -> Dict[str, str]:
+    return {
+        "name": name or "",
+        "description": description or "",
+        "feature_type": feature_type,
+    }
+
+
+def build_clean_geojson(doc_title: str, points: List[OutPoint], impact_geom: Optional[etree._Element]) -> bytes:
+    features: List[Dict] = []
+
+    if points:
+        features.append({
+            "type": "Feature",
+            "properties": feature_properties("Storm Track", TRACK_DESCRIPTION, "forecast_track"),
+            "geometry": {
+                "type": "LineString",
+                "coordinates": [[round(normalize_lon_180(p.lon), 8), round(p.lat, 8)] for p in points],
+            },
+        })
+
+    for p in points:
+        features.append({
+            "type": "Feature",
+            "properties": feature_properties(p.name, p.description, "forecast_point"),
+            "geometry": {
+                "type": "Point",
+                "coordinates": [round(normalize_lon_180(p.lon), 8), round(p.lat, 8)],
+            },
+        })
+
+    if impact_geom is not None:
+        geom = geometry_to_geojson_dateline_safe(impact_geom)
+
+        if geom is not None:
+            features.append({
+                "type": "Feature",
+                "properties": feature_properties("Impact Zone", IMPACT_DESCRIPTION, "impact_zone"),
+                "geometry": geom,
+            })
+
+    fc = {
+        "type": "FeatureCollection",
+        "name": doc_title,
+        "features": features,
+    }
+
+    return json.dumps(fc, ensure_ascii=False, indent=2).encode("utf-8")
+
+
+def build_nhc_geojson(
+    doc_title: str,
+    track_points: List[Tuple[float, float, datetime, int, str]],
+    toa_polygon: Optional[etree._Element],
+    toa_folder_name: Optional[str],
+    ww_folder_name: Optional[str],
+    ww_lines: List[Tuple[str, str, List[Tuple[float, float]]]],
+) -> bytes:
+    features: List[Dict] = []
+
+    if toa_polygon is not None and toa_folder_name:
+        geom = geometry_to_geojson_dateline_safe(toa_polygon)
+
+        if geom is not None:
+            features.append({
+                "type": "Feature",
+                "properties": feature_properties(toa_folder_name, IMPACT_DESCRIPTION, "impact_zone"),
+                "geometry": geom,
+            })
+
+    if track_points:
+        features.append({
+            "type": "Feature",
+            "properties": feature_properties("Storm Track", TRACK_DESCRIPTION, "forecast_track"),
+            "geometry": {
+                "type": "LineString",
+                "coordinates": [[round(normalize_lon_180(lon), 8), round(lat, 8)] for lon, lat, _dt, _knots, _tz in track_points],
+            },
+        })
+
+    for lon, lat, dt_local_naive, knots, tz_abbrev in track_points:
+        category = classify_wind_nhc(knots)
+        kph, mph = knots_to_kph_mph(knots)
+        desc_text = (
+            f"{category}: The forecast center of circulation with a wind speed of "
+            f"{knots} knots / {kph} kph / {mph} mph at "
+            f"{dt_local_naive.strftime('%H:%M')} {tz_abbrev} {format_month_day_dot(dt_local_naive)}."
+        )
+
+        features.append({
+            "type": "Feature",
+            "properties": feature_properties("", desc_text, "forecast_point"),
+            "geometry": {
+                "type": "Point",
+                "coordinates": [round(normalize_lon_180(lon), 8), round(lat, 8)],
+            },
+        })
+
+    if ww_folder_name and ww_lines:
+        for warn_name, warn_desc, coords in ww_lines:
+            features.append({
+                "type": "Feature",
+                "properties": feature_properties(warn_name, warn_desc, "watch_warning"),
+                "geometry": {
+                    "type": "LineString",
+                    "coordinates": [[round(normalize_lon_180(lon), 8), round(lat, 8)] for lon, lat in coords],
+                },
+            })
+
+    fc = {
+        "type": "FeatureCollection",
+        "name": doc_title,
+        "features": features,
+    }
+
+    return json.dumps(fc, ensure_ascii=False, indent=2).encode("utf-8")
+
+
 # ======================================================================================
 # CATEGORY LABELS
 # ======================================================================================
@@ -1440,7 +1651,7 @@ def build_clean_kml_simple(doc_title: str, points: List[OutPoint], impact_geom: 
     return etree.tostring(kml, xml_declaration=True, encoding="UTF-8", pretty_print=False)
 
 
-def convert_jtwc_kmz(raw_kmz: bytes) -> Tuple[bytes, str]:
+def convert_jtwc_kmz(raw_kmz: bytes, output_format: str = "geojson") -> Tuple[bytes, str]:
     raw_kml = read_kmz_kml_bytes(raw_kmz)
     root = parse_xml_bytes(raw_kml)
     ns = root.nsmap.get(None, KML_NS_22)
@@ -1536,8 +1747,12 @@ def convert_jtwc_kmz(raw_kmz: bytes) -> Tuple[bytes, str]:
     parts = [p for p in [storm_id, storm_name, d_h, "Cleaned Forecast"] if p]
     file_stem = " ".join(parts).strip() or "output"
 
-    out_kml = build_clean_kml_simple(file_stem, out_points, impact_geom)
-    return out_kml, file_stem
+    if output_format.lower() == "geojson":
+        out_payload = build_clean_geojson(file_stem, out_points, impact_geom)
+    else:
+        out_payload = build_clean_kml_simple(file_stem, out_points, impact_geom)
+
+    return out_payload, file_stem
 
 
 # ======================================================================================
@@ -1709,7 +1924,7 @@ def build_nhc_kml(
     return etree.tostring(kml, xml_declaration=True, encoding="UTF-8", pretty_print=False)
 
 
-def convert_nhc(track_kmz: bytes, toa34_kmz: Optional[bytes], ww_kmz: Optional[bytes]) -> Tuple[bytes, str]:
+def convert_nhc(track_kmz: bytes, toa34_kmz: Optional[bytes], ww_kmz: Optional[bytes], output_format: str = "geojson") -> Tuple[bytes, str]:
     track_root, track_ns = load_kmz_root(track_kmz)
     track_doc = get_doc(track_root, track_ns, "NHC TRACK")
 
@@ -1812,22 +2027,33 @@ def convert_nhc(track_kmz: bytes, toa34_kmz: Optional[bytes], ww_kmz: Optional[b
             warn_desc = f"{warn_name}: Advisory in place as of {adv_local_naive.strftime('%H:%M')} {adv_tz_abbrev} {format_month_day_dot(adv_local_naive)}."
             ww_lines.append((warn_name, warn_desc, pts))
 
-    out_kml = build_nhc_kml(
-        track_points=track_points,
-        toa_polygon=toa_polygon,
-        toa_folder_name=toa_folder_name,
-        ww_folder_name=ww_folder_name,
-        ww_lines=ww_lines,
-        doc_title=file_stem,
-    )
-    return out_kml, file_stem
+    if output_format.lower() == "geojson":
+        out_payload = build_nhc_geojson(
+            doc_title=file_stem,
+            track_points=track_points,
+            toa_polygon=toa_polygon,
+            toa_folder_name=toa_folder_name,
+            ww_folder_name=ww_folder_name,
+            ww_lines=ww_lines,
+        )
+    else:
+        out_payload = build_nhc_kml(
+            track_points=track_points,
+            toa_polygon=toa_polygon,
+            toa_folder_name=toa_folder_name,
+            ww_folder_name=ww_folder_name,
+            ww_lines=ww_lines,
+            doc_title=file_stem,
+        )
+
+    return out_payload, file_stem
 
 
 # ======================================================================================
 # Streamlit UI (left-aligned, full-width)
 # ======================================================================================
 def reset_output_state():
-    st.session_state.out_kml = None
+    st.session_state.out_payload = None
     st.session_state.out_name = None
     st.session_state.last_upload_sig = None
     st.session_state.uploader_key = st.session_state.get("uploader_key", 0) + 1
@@ -1856,11 +2082,11 @@ st.markdown(
     }
     </style>
     """,
-    unsafe_allow_html=True
+    unsafe_allow_html=True,
 )
 
-if "out_kml" not in st.session_state:
-    st.session_state.out_kml = None
+if "out_payload" not in st.session_state:
+    st.session_state.out_payload = None
 if "out_name" not in st.session_state:
     st.session_state.out_name = None
 if "last_upload_sig" not in st.session_state:
@@ -1872,26 +2098,30 @@ source = st.radio("Source", ["JTWC", "NHC"], horizontal=True)
 st.divider()
 
 if source == "JTWC":
-    raw = st.file_uploader("Upload raw JTWC KML/KMZ", type=["kmz", "kml"], key=f"uploader_{st.session_state.uploader_key}_jtwc")
+    raw = st.file_uploader(
+        "Upload raw JTWC KML/KMZ",
+        type=["kmz", "kml"],
+        key=f"uploader_{st.session_state.uploader_key}_jtwc",
+    )
 
     if raw is not None:
         upload_sig = ("JTWC", raw.name, raw.size)
         if st.session_state.last_upload_sig != upload_sig:
             st.session_state.last_upload_sig = upload_sig
-            st.session_state.out_kml = None
+            st.session_state.out_payload = None
             st.session_state.out_name = None
 
     if raw is None:
-        st.info("Upload JTWC KMZ to begin.")
+        st.info("Upload JTWC KML/KMZ to begin. Output will be GeoJSON.")
     else:
-        if st.session_state.out_kml is None:
+        if st.session_state.out_payload is None:
             st.write(f"Selected file: **{raw.name}**")
             if st.button("Convert", type="primary", use_container_width=True):
                 with st.spinner("Converting…"):
                     try:
-                        out_kml, stem = convert_jtwc_kmz(raw.getvalue())
-                        st.session_state.out_kml = out_kml
-                        st.session_state.out_name = f"{safe_filename(stem, 'output')}.kml"
+                        out_payload, stem = convert_jtwc_kmz(raw.getvalue())
+                        st.session_state.out_payload = out_payload
+                        st.session_state.out_name = f"{safe_filename(stem, 'output')}.{DEFAULT_OUTPUT_EXT}"
                         st.success("Conversion complete.")
                         st.rerun()
                     except Exception as e:
@@ -1899,10 +2129,10 @@ if source == "JTWC":
         else:
             st.write(f"Output file: **{st.session_state.out_name}**")
             st.download_button(
-                "Download KML",
-                data=st.session_state.out_kml,
+                f"Download {DEFAULT_OUTPUT_LABEL}",
+                data=st.session_state.out_payload,
                 file_name=st.session_state.out_name,
-                mime="application/vnd.google-earth.kml+xml",
+                mime=DEFAULT_OUTPUT_MIME,
                 use_container_width=True,
             )
             if st.button("Convert another file", use_container_width=True):
@@ -1910,36 +2140,50 @@ if source == "JTWC":
                 st.rerun()
 
 else:
-
-    track = st.file_uploader("Upload TRACK KML/KMZ (required)", type=["kmz", "kml"], key=f"uploader_{st.session_state.uploader_key}_nhc_track")
-    toa = st.file_uploader("Upload Earliest Reasonable TOA 34 KML/KMZ", type=["kmz", "kml"], key=f"uploader_{st.session_state.uploader_key}_nhc_toa")
-    ww = st.file_uploader("Upload WW KML/KMZ", type=["kmz", "kml"], key=f"uploader_{st.session_state.uploader_key}_nhc_ww")
+    track = st.file_uploader(
+        "Upload TRACK KML/KMZ (required)",
+        type=["kmz", "kml"],
+        key=f"uploader_{st.session_state.uploader_key}_nhc_track",
+    )
+    toa = st.file_uploader(
+        "Upload Earliest Reasonable TOA 34 KML/KMZ",
+        type=["kmz", "kml"],
+        key=f"uploader_{st.session_state.uploader_key}_nhc_toa",
+    )
+    ww = st.file_uploader(
+        "Upload WW KML/KMZ",
+        type=["kmz", "kml"],
+        key=f"uploader_{st.session_state.uploader_key}_nhc_ww",
+    )
 
     sig_parts = ["NHC"]
-    if track: sig_parts += [track.name, track.size]
-    if toa: sig_parts += [toa.name, toa.size]
-    if ww: sig_parts += [ww.name, ww.size]
+    if track:
+        sig_parts += [track.name, track.size]
+    if toa:
+        sig_parts += [toa.name, toa.size]
+    if ww:
+        sig_parts += [ww.name, ww.size]
     upload_sig = tuple(sig_parts) if len(sig_parts) > 1 else None
 
     if upload_sig and st.session_state.last_upload_sig != upload_sig:
         st.session_state.last_upload_sig = upload_sig
-        st.session_state.out_kml = None
+        st.session_state.out_payload = None
         st.session_state.out_name = None
 
     if track is None:
-        st.info("Upload NHC KMZ to begin.")
+        st.info("Upload NHC KML/KMZ to begin. Output will be GeoJSON.")
     else:
-        if st.session_state.out_kml is None:
+        if st.session_state.out_payload is None:
             if st.button("Convert", type="primary", use_container_width=True):
                 with st.spinner("Converting…"):
                     try:
-                        out_kml, stem = convert_nhc(
+                        out_payload, stem = convert_nhc(
                             track.getvalue(),
                             toa.getvalue() if toa else None,
                             ww.getvalue() if ww else None,
                         )
-                        st.session_state.out_kml = out_kml
-                        st.session_state.out_name = f"{safe_filename(stem, 'output')}.kml"
+                        st.session_state.out_payload = out_payload
+                        st.session_state.out_name = f"{safe_filename(stem, 'output')}.{DEFAULT_OUTPUT_EXT}"
                         st.success("Conversion complete.")
                         st.rerun()
                     except Exception as e:
@@ -1947,10 +2191,10 @@ else:
         else:
             st.write(f"Output file: **{st.session_state.out_name}**")
             st.download_button(
-                "Download KML",
-                data=st.session_state.out_kml,
+                f"Download {DEFAULT_OUTPUT_LABEL}",
+                data=st.session_state.out_payload,
                 file_name=st.session_state.out_name,
-                mime="application/vnd.google-earth.kml+xml",
+                mime=DEFAULT_OUTPUT_MIME,
                 use_container_width=True,
             )
             if st.button("Convert another file", use_container_width=True):
