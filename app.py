@@ -2099,7 +2099,7 @@ st.divider()
 
 if source == "JTWC":
     raw = st.file_uploader(
-        "Upload raw JTWC KML/KMZ",
+        "Upload raw JTWC KMZ",
         type=["kmz", "kml"],
         key=f"uploader_{st.session_state.uploader_key}_jtwc",
     )
@@ -2112,7 +2112,7 @@ if source == "JTWC":
             st.session_state.out_name = None
 
     if raw is None:
-        st.info("Upload JTWC KML/KMZ to begin. Output will be GeoJSON.")
+        st.info("Upload JTWC KMZ to begin")
     else:
         if st.session_state.out_payload is None:
             st.write(f"Selected file: **{raw.name}**")
