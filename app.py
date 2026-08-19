@@ -19,7 +19,7 @@ from timezonefinder import TimezoneFinder
 # App branding
 # =========================
 APP_NAME = "StormTrack Mapper"
-APP_DESC = "Convert JTWC or NHC storm files into clean, analyst-ready geojson for alert mapping."
+APP_DESC = "Convert JTWC or NHC storm files into clean, analyst-ready GeoJSON for alert mapping."
 
 TRACK_DESCRIPTION = "Forecast Track: The forecast track of the system's center of circulation."
 IMPACT_DESCRIPTION = "Forecast Impact Zone: The area in which impacts from the tropical system are likely to be felt."
@@ -32,21 +32,11 @@ KML_NS_22 = "http://www.opengis.net/kml/2.2"
 NSMAP_22 = {None: KML_NS_22}
 TF = TimezoneFinder()
 
-# KML has no true <MultiPolygon>; the standards-compliant multi-part form is
-# <Placemark><MultiGeometry><Polygon>...</Polygon>...</MultiGeometry></Placemark>.
-# Some downstream map importers explode MultiGeometry into separate legend rows.
-# To force one legend row in those tools, use the dateline-seamed single Polygon
-# mode below. Change to "multigeometry" if your target renderer preserves one
-# legend item for a KML MultiGeometry.
-ANTIMERIDIAN_SPLIT_MODE = "single_legend_polygon"
-# ANTIMERIDIAN_SPLIT_MODE = "multigeometry"
-
 MONTH_DOT = {
     1: "Jan.", 2: "Feb.", 3: "Mar.", 4: "Apr.", 5: "May.", 6: "Jun.",
     7: "Jul.", 8: "Aug.", 9: "Sep.", 10: "Oct.", 11: "Nov.", 12: "Dec."
 }
 
-DEFAULT_OUTPUT_FORMAT = "geojson"
 DEFAULT_OUTPUT_EXT = "geojson"
 DEFAULT_OUTPUT_MIME = "application/geo+json"
 DEFAULT_OUTPUT_LABEL = "GeoJSON"
@@ -915,214 +905,6 @@ def split_polygon_antimeridian(poly: etree._Element) -> List[etree._Element]:
 
 
 
-def ring_open_vertices(ring: List[Coord3]) -> List[Coord3]:
-    if len(ring) > 1 and same_xy(ring[0], ring[-1]):
-        return list(ring[:-1])
-    return list(ring)
-
-
-def is_dateline_point(pt: Coord3) -> bool:
-    return abs(abs(pt[0]) - ANTIMERIDIAN_LON) <= 1.0e-7
-
-
-def ring_path_between(vertices: List[Coord3], start_idx: int, end_idx: int) -> List[Coord3]:
-    n = len(vertices)
-
-    if n == 0:
-        return []
-
-    path: List[Coord3] = []
-    i = start_idx % n
-
-    while True:
-        path.append(vertices[i])
-
-        if i == end_idx % n:
-            break
-
-        i = (i + 1) % n
-
-        if len(path) > n + 1:
-            return []
-
-    return path
-
-
-def non_boundary_score(path: List[Coord3]) -> int:
-    return sum(1 for pt in path if not is_dateline_point(pt))
-
-
-def dateline_non_boundary_path(ring: List[Coord3]) -> Optional[List[Coord3]]:
-    """
-    For one clipped antimeridian piece, return the edge path that is NOT the
-    artificial dateline edge. The returned path includes both dateline endpoints.
-    """
-    vertices = ring_open_vertices(close_ring(dedupe_consecutive(ring)))
-    boundary_indices = [i for i, pt in enumerate(vertices) if is_dateline_point(pt)]
-
-    if len(boundary_indices) != 2:
-        return None
-
-    i, j = boundary_indices
-    path_ij = ring_path_between(vertices, i, j)
-    path_ji = ring_path_between(vertices, j, i)
-
-    if non_boundary_score(path_ij) >= non_boundary_score(path_ji):
-        return path_ij
-
-    return path_ji
-
-
-def approx_same_dateline_lat(a: Coord3, b: Coord3, eps: float = 1.0e-6) -> bool:
-    return is_dateline_point(a) and is_dateline_point(b) and abs(a[1] - b[1]) <= eps
-
-
-def orient_path_to_start_end(path: List[Coord3], start_pt: Coord3, end_pt: Coord3) -> Optional[List[Coord3]]:
-    if not path:
-        return None
-
-    if approx_same_dateline_lat(path[0], start_pt) and approx_same_dateline_lat(path[-1], end_pt):
-        return path
-
-    rev = list(reversed(path))
-
-    if approx_same_dateline_lat(rev[0], start_pt) and approx_same_dateline_lat(rev[-1], end_pt):
-        return rev
-
-    return None
-
-
-def single_legend_polygon_from_dateline_parts(parts: List[etree._Element], source_poly: etree._Element) -> Optional[etree._Element]:
-    """
-    Compatibility fallback for map tools that explode KML MultiGeometry into
-    separate legend rows.
-
-    The standards-compliant KML multipolygon output is one Placemark containing
-    MultiGeometry. Some importers still show each child Polygon as a separate
-    legend item. This function keeps one KML Polygon by connecting the two split
-    pieces along the antimeridian seam only. Visually, the hazard remains cut at
-    +/-180, but the importer sees one Polygon geometry.
-    """
-    if len(parts) != 2:
-        return None
-
-    ring_a = polygon_outer_ring(parts[0])
-    ring_b = polygon_outer_ring(parts[1])
-
-    if not ring_a or not ring_b:
-        return None
-
-    path_a = dateline_non_boundary_path(ring_a)
-    path_b = dateline_non_boundary_path(ring_b)
-
-    if not path_a or not path_b:
-        return None
-
-    a_start, a_end = path_a[0], path_a[-1]
-    b_oriented = orient_path_to_start_end(path_b, a_end, a_start)
-
-    if b_oriented is None:
-        # Try the opposite orientation for the first path.
-        path_a = list(reversed(path_a))
-        a_start, a_end = path_a[0], path_a[-1]
-        b_oriented = orient_path_to_start_end(path_b, a_end, a_start)
-
-    if b_oriented is None:
-        return None
-
-    # Keep both +180 and -180 seam vertices so renderers have an explicit
-    # antimeridian edge instead of a world-spanning segment.
-    combined = list(path_a) + list(b_oriented)
-    combined = close_ring(dedupe_consecutive(combined))
-
-    if unique_xy_count(combined) < 3 or ring_area_abs(combined) <= GEOM_EPS:
-        return None
-
-    return polygon_from_outer_ring(combined, source_poly)
-
-
-def split_antimeridian_geometry(geom: etree._Element) -> etree._Element:
-    """
-    Split polygon geometry at the 180th meridian while preserving one KML item.
-
-    Standard KML multipolygon equivalent:
-        one Placemark + one MultiGeometry + multiple Polygon children.
-
-    Compatibility mode:
-        one Placemark + one seamed Polygon, for importers that create one legend
-        row per Polygon child inside a MultiGeometry.
-    """
-    lname = kml_local_name(geom)
-
-    if lname == "Polygon":
-        parts = split_polygon_antimeridian(geom)
-
-        if len(parts) == 1:
-            return parts[0]
-
-        if ANTIMERIDIAN_SPLIT_MODE == "single_legend_polygon":
-            single_poly = single_legend_polygon_from_dateline_parts(parts, geom)
-
-            if single_poly is not None:
-                return single_poly
-
-        mg = etree.Element(q(KML_NS_22, "MultiGeometry"))
-
-        for part in parts:
-            mg.append(part)
-
-        return mg
-
-    if lname == "MultiGeometry":
-        changed = False
-        mg = etree.Element(q(KML_NS_22, "MultiGeometry"))
-
-        for child in geom:
-            child_lname = kml_local_name(child)
-
-            if child_lname == "Polygon":
-                split_child = split_antimeridian_geometry(child)
-
-                if etree.tostring(split_child) != etree.tostring(child):
-                    changed = True
-
-                if kml_local_name(split_child) == "MultiGeometry":
-                    for grandchild in split_child:
-                        mg.append(grandchild)
-                else:
-                    mg.append(split_child)
-
-            elif child_lname == "MultiGeometry":
-                split_child = split_antimeridian_geometry(child)
-
-                if etree.tostring(split_child) != etree.tostring(child):
-                    changed = True
-
-                if kml_local_name(split_child) == "MultiGeometry":
-                    for grandchild in split_child:
-                        mg.append(grandchild)
-                else:
-                    mg.append(split_child)
-
-            else:
-                mg.append(etree.fromstring(etree.tostring(child)))
-
-        if ANTIMERIDIAN_SPLIT_MODE == "single_legend_polygon":
-            mg_children = [child for child in mg if isinstance(child.tag, str)]
-            mg_polys = [child for child in mg_children if kml_local_name(child) == "Polygon"]
-            mg_other = [child for child in mg_children if kml_local_name(child) != "Polygon"]
-
-            if len(mg_polys) == 2 and not mg_other:
-                single_poly = single_legend_polygon_from_dateline_parts(mg_polys, mg_polys[0])
-
-                if single_poly is not None:
-                    return single_poly
-
-        return mg if changed else etree.fromstring(etree.tostring(geom))
-
-    return etree.fromstring(etree.tostring(geom))
-
-
 # =========================
 # GeoJSON output helpers
 # =========================
@@ -1617,41 +1399,8 @@ class OutPoint:
     description: str
 
 
-def build_clean_kml_simple(doc_title: str, points: List[OutPoint], impact_geom: Optional[etree._Element]) -> bytes:
-    kml = etree.Element(q(KML_NS_22, "kml"), nsmap=NSMAP_22)
-    doc = etree.SubElement(kml, q(KML_NS_22, "Document"))
-    etree.SubElement(doc, q(KML_NS_22, "name")).text = doc_title
 
-    folder = etree.SubElement(doc, q(KML_NS_22, "Folder"))
-    etree.SubElement(folder, q(KML_NS_22, "name")).text = "Forecast"
-
-    pm_track = etree.SubElement(folder, q(KML_NS_22, "Placemark"))
-    etree.SubElement(pm_track, q(KML_NS_22, "name")).text = "Storm Track"
-    d = etree.SubElement(pm_track, q(KML_NS_22, "description"))
-    d.text = etree.CDATA(TRACK_DESCRIPTION)
-    ls = etree.SubElement(pm_track, q(KML_NS_22, "LineString"))
-    etree.SubElement(ls, q(KML_NS_22, "tessellate")).text = "1"
-    etree.SubElement(ls, q(KML_NS_22, "coordinates")).text = " ".join(f"{p.lon},{p.lat},0" for p in points)
-
-    for p in points:
-        pm = etree.SubElement(folder, q(KML_NS_22, "Placemark"))
-        etree.SubElement(pm, q(KML_NS_22, "name")).text = p.name
-        desc = etree.SubElement(pm, q(KML_NS_22, "description"))
-        desc.text = etree.CDATA(p.description)
-        pt = etree.SubElement(pm, q(KML_NS_22, "Point"))
-        etree.SubElement(pt, q(KML_NS_22, "coordinates")).text = f"{p.lon},{p.lat},0"
-
-    if impact_geom is not None:
-        pm_sw = etree.SubElement(folder, q(KML_NS_22, "Placemark"))
-        etree.SubElement(pm_sw, q(KML_NS_22, "name")).text = "Impact Zone"
-        desc = etree.SubElement(pm_sw, q(KML_NS_22, "description"))
-        desc.text = etree.CDATA(IMPACT_DESCRIPTION)
-        pm_sw.append(split_antimeridian_geometry(impact_geom))
-
-    return etree.tostring(kml, xml_declaration=True, encoding="UTF-8", pretty_print=False)
-
-
-def convert_jtwc_kmz(raw_kmz: bytes, output_format: str = "geojson") -> Tuple[bytes, str]:
+def convert_jtwc_kmz(raw_kmz: bytes) -> Tuple[bytes, str]:
     raw_kml = read_kmz_kml_bytes(raw_kmz)
     root = parse_xml_bytes(raw_kml)
     ns = root.nsmap.get(None, KML_NS_22)
@@ -1747,11 +1496,7 @@ def convert_jtwc_kmz(raw_kmz: bytes, output_format: str = "geojson") -> Tuple[by
     parts = [p for p in [storm_id, storm_name, d_h, "Cleaned Forecast"] if p]
     file_stem = " ".join(parts).strip() or "output"
 
-    if output_format.lower() == "geojson":
-        out_payload = build_clean_geojson(file_stem, out_points, impact_geom)
-    else:
-        out_payload = build_clean_kml_simple(file_stem, out_points, impact_geom)
-
+    out_payload = build_clean_geojson(file_stem, out_points, impact_geom)
     return out_payload, file_stem
 
 
@@ -1852,79 +1597,8 @@ def linestring_to_polygon_geom(line_coords: List[Tuple[float, float]]) -> etree.
     return poly
 
 
-def build_nhc_kml(
-    track_points: List[Tuple[float, float, datetime, int, str]],
-    toa_polygon: Optional[etree._Element],
-    toa_folder_name: Optional[str],
-    ww_folder_name: Optional[str],
-    ww_lines: List[Tuple[str, str, List[Tuple[float, float]]]],
-    doc_title: str = "Cleaned Forecast",
-) -> bytes:
-    kml = etree.Element(q(KML_NS_22, "kml"), nsmap=NSMAP_22)
-    doc = etree.SubElement(kml, q(KML_NS_22, "Document"))
-    etree.SubElement(doc, q(KML_NS_22, "name")).text = doc_title
 
-    # Optional TOA folder
-    if toa_polygon is not None and toa_folder_name:
-        f_toa = etree.SubElement(doc, q(KML_NS_22, "Folder"))
-        etree.SubElement(f_toa, q(KML_NS_22, "name")).text = toa_folder_name
-
-        pm_toa = etree.SubElement(f_toa, q(KML_NS_22, "Placemark"))
-        etree.SubElement(pm_toa, q(KML_NS_22, "name")).text = ""
-        d_toa = etree.SubElement(pm_toa, q(KML_NS_22, "description"))
-        d_toa.text = etree.CDATA(IMPACT_DESCRIPTION)
-        pm_toa.append(split_antimeridian_geometry(toa_polygon))
-
-    # Forecast Track folder
-    f_track = etree.SubElement(doc, q(KML_NS_22, "Folder"))
-    etree.SubElement(f_track, q(KML_NS_22, "name")).text = "Forecast Track"
-
-    pm_line = etree.SubElement(f_track, q(KML_NS_22, "Placemark"))
-    etree.SubElement(pm_line, q(KML_NS_22, "name")).text = ""
-    d_line = etree.SubElement(pm_line, q(KML_NS_22, "description"))
-    d_line.text = etree.CDATA(TRACK_DESCRIPTION)
-
-    ls = etree.SubElement(pm_line, q(KML_NS_22, "LineString"))
-    etree.SubElement(ls, q(KML_NS_22, "tessellate")).text = "1"
-    etree.SubElement(ls, q(KML_NS_22, "coordinates")).text = "\n".join(
-        f"{lon},{lat},0" for lon, lat, _, _, _ in track_points
-    )
-
-    for lon, lat, dt_local_naive, knots, tz_abbrev in track_points:
-        category = classify_wind_nhc(knots)
-        kph, mph = knots_to_kph_mph(knots)
-
-        desc_text = (
-            f"{category}: The forecast center of circulation with a wind speed of "
-            f"{knots} knots / {kph} kph / {mph} mph at {dt_local_naive.strftime('%H:%M')} {tz_abbrev} {format_month_day_dot(dt_local_naive)}."
-        )
-
-        pm = etree.SubElement(f_track, q(KML_NS_22, "Placemark"))
-        etree.SubElement(pm, q(KML_NS_22, "name")).text = ""
-        d = etree.SubElement(pm, q(KML_NS_22, "description"))
-        d.text = etree.CDATA(desc_text)
-        pt = etree.SubElement(pm, q(KML_NS_22, "Point"))
-        etree.SubElement(pt, q(KML_NS_22, "coordinates")).text = f"{lon},{lat},0"
-
-    if ww_folder_name and ww_lines:
-        f_ww = etree.SubElement(doc, q(KML_NS_22, "Folder"))
-        etree.SubElement(f_ww, q(KML_NS_22, "name")).text = ww_folder_name
-
-        for warn_name, warn_desc, coords in ww_lines:
-            pmw = etree.SubElement(f_ww, q(KML_NS_22, "Placemark"))
-            etree.SubElement(pmw, q(KML_NS_22, "name")).text = warn_name
-            dw = etree.SubElement(pmw, q(KML_NS_22, "description"))
-            dw.text = etree.CDATA(warn_desc)
-            lsw = etree.SubElement(pmw, q(KML_NS_22, "LineString"))
-            etree.SubElement(lsw, q(KML_NS_22, "tessellate")).text = "1"
-            etree.SubElement(lsw, q(KML_NS_22, "coordinates")).text = "\n".join(
-                f"{lon},{lat},0" for lon, lat in coords
-            )
-
-    return etree.tostring(kml, xml_declaration=True, encoding="UTF-8", pretty_print=False)
-
-
-def convert_nhc(track_kmz: bytes, toa34_kmz: Optional[bytes], ww_kmz: Optional[bytes], output_format: str = "geojson") -> Tuple[bytes, str]:
+def convert_nhc(track_kmz: bytes, toa34_kmz: Optional[bytes], ww_kmz: Optional[bytes]) -> Tuple[bytes, str]:
     track_root, track_ns = load_kmz_root(track_kmz)
     track_doc = get_doc(track_root, track_ns, "NHC TRACK")
 
@@ -2027,30 +1701,19 @@ def convert_nhc(track_kmz: bytes, toa34_kmz: Optional[bytes], ww_kmz: Optional[b
             warn_desc = f"{warn_name}: Advisory in place as of {adv_local_naive.strftime('%H:%M')} {adv_tz_abbrev} {format_month_day_dot(adv_local_naive)}."
             ww_lines.append((warn_name, warn_desc, pts))
 
-    if output_format.lower() == "geojson":
-        out_payload = build_nhc_geojson(
-            doc_title=file_stem,
-            track_points=track_points,
-            toa_polygon=toa_polygon,
-            toa_folder_name=toa_folder_name,
-            ww_folder_name=ww_folder_name,
-            ww_lines=ww_lines,
-        )
-    else:
-        out_payload = build_nhc_kml(
-            track_points=track_points,
-            toa_polygon=toa_polygon,
-            toa_folder_name=toa_folder_name,
-            ww_folder_name=ww_folder_name,
-            ww_lines=ww_lines,
-            doc_title=file_stem,
-        )
-
+    out_payload = build_nhc_geojson(
+        doc_title=file_stem,
+        track_points=track_points,
+        toa_polygon=toa_polygon,
+        toa_folder_name=toa_folder_name,
+        ww_folder_name=ww_folder_name,
+        ww_lines=ww_lines,
+    )
     return out_payload, file_stem
 
 
 # ======================================================================================
-# Streamlit UI (left-aligned, full-width)
+# Streamlit UI
 # ======================================================================================
 def reset_output_state():
     st.session_state.out_payload = None
@@ -2112,7 +1775,7 @@ if source == "JTWC":
             st.session_state.out_name = None
 
     if raw is None:
-        st.info("Upload JTWC KMZ to begin")
+        st.info("Upload JTWC KMZ to begin.")
     else:
         if st.session_state.out_payload is None:
             st.write(f"Selected file: **{raw.name}**")
@@ -2141,17 +1804,17 @@ if source == "JTWC":
 
 else:
     track = st.file_uploader(
-        "Upload TRACK KML/KMZ (required)",
+        "Upload TRACK KMZ (required)",
         type=["kmz", "kml"],
         key=f"uploader_{st.session_state.uploader_key}_nhc_track",
     )
     toa = st.file_uploader(
-        "Upload Earliest Reasonable TOA 34 KML/KMZ",
+        "Upload Earliest Reasonable TOA 34 KMZ",
         type=["kmz", "kml"],
         key=f"uploader_{st.session_state.uploader_key}_nhc_toa",
     )
     ww = st.file_uploader(
-        "Upload WW KML/KMZ",
+        "Upload WW KMZ",
         type=["kmz", "kml"],
         key=f"uploader_{st.session_state.uploader_key}_nhc_ww",
     )
@@ -2171,7 +1834,7 @@ else:
         st.session_state.out_name = None
 
     if track is None:
-        st.info("Upload NHC KML/KMZ to begin. Output will be GeoJSON.")
+        st.info("Upload NHC KMZ to begin.")
     else:
         if st.session_state.out_payload is None:
             if st.button("Convert", type="primary", use_container_width=True):
