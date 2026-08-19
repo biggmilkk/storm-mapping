@@ -19,7 +19,7 @@ from timezonefinder import TimezoneFinder
 # App branding
 # =========================
 APP_NAME = "StormTrack Mapper"
-APP_DESC = "Convert JTWC or NHC storm KML/KMZ files into clean, dateline-safe GeoJSON for alert mapping."
+APP_DESC = "Convert JTWC or NHC storm files into clean, analyst-ready geojson for alert mapping."
 
 TRACK_DESCRIPTION = "Forecast Track: The forecast track of the system's center of circulation."
 IMPACT_DESCRIPTION = "Forecast Impact Zone: The area in which impacts from the tropical system are likely to be felt."
